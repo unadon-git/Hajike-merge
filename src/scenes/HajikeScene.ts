@@ -14,12 +14,16 @@ import {
   calculateLaunchSpeed,
   calculateMergeScore,
   comboMultiplier,
+  containCircleInBounds,
   dangerDurationReached,
   dangerProgress,
   canMerge,
+  limitVector,
   loadBestScore,
   mergedLevel,
   nextComboCount,
+  pointAlongPath,
+  projectPointToPath,
   saveBestScore,
   updateBestScore,
 } from '../logic/gameLogic';
@@ -86,6 +90,8 @@ export class HajikeScene extends Phaser.Scene {
   private chargeStartedAt: number | null = null;
   private launchBumperHitCount = 0;
   private lastLaunchBumperId: number | null = null;
+  private launchPathDistance = 0;
+  private launchLastProgressAt = 0;
 
   private readonly actionHandler = (event: Event): void => {
     const { action } = (event as CustomEvent<GameActionDetail>).detail;
@@ -104,6 +110,10 @@ export class HajikeScene extends Phaser.Scene {
 
   private readonly chargeEndHandler = (): void => {
     this.releaseCharge();
+  };
+
+  private readonly chargeCancelHandler = (): void => {
+    this.cancelCharge();
   };
 
   private readonly collisionStartHandler = (event: CollisionEventLike): void => {
@@ -147,6 +157,7 @@ export class HajikeScene extends Phaser.Scene {
 
   public create(): void {
     this.bag = new BallBagQueue(this.random);
+    this.nextBallId = 1;
     this.score = 0;
     this.bestScore = loadBestScore();
     this.comboCount = 0;
@@ -156,6 +167,8 @@ export class HajikeScene extends Phaser.Scene {
     this.chargeStartedAt = null;
     this.launchBumperHitCount = 0;
     this.lastLaunchBumperId = null;
+    this.launchPathDistance = 0;
+    this.launchLastProgressAt = 0;
     this.bumperHitCooldowns.clear();
     this.state = 'Initializing';
 
@@ -171,6 +184,7 @@ export class HajikeScene extends Phaser.Scene {
     window.addEventListener('hajike:action', this.actionHandler);
     window.addEventListener('hajike:charge-start', this.chargeStartHandler);
     window.addEventListener('hajike:charge-end', this.chargeEndHandler);
+    window.addEventListener('hajike:charge-cancel', this.chargeCancelHandler);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.handleShutdown, this);
 
     this.emit('hajike:score', { score: this.score, best: this.bestScore });
@@ -191,7 +205,9 @@ export class HajikeScene extends Phaser.Scene {
       });
     }
 
-    this.updateLaunchProgress();
+    this.capAllBodySpeeds();
+    this.updateLaunchProgress(now);
+    this.recoverFieldBodies();
     this.resolveMergeContacts(now);
     this.capAllBodySpeeds();
     this.updateDangerState(now);
@@ -231,23 +247,31 @@ export class HajikeScene extends Phaser.Scene {
       speed,
     );
     this.launchedBallId = ball.id;
+    this.launchPathDistance = 0;
+    this.launchLastProgressAt = this.time.now;
     const launchDirection = this.laneDirection(0);
     this.setBodyVelocity(ball.body, {
-      x: launchDirection.x * speed,
-      y: launchDirection.y * speed,
+      x: launchDirection.x * GAME_CONFIG.launchLane.laneTravelSpeed,
+      y: launchDirection.y * GAME_CONFIG.launchLane.laneTravelSpeed,
     });
     this.setBodyAngularVelocity(ball.body, level % 2 === 0 ? 0.045 : -0.045);
     this.setState('Launching');
     this.emit('hajike:effect', { message: `Lv.${level} ç™ºå°„ï¼` });
     this.time.delayedCall(GAME_CONFIG.launchLane.fallbackTimeoutMs, () => {
       if (this.launchedBallId !== ball.id || !this.balls.has(ball.id)) return;
-      this.enterFieldFromLane(ball);
       // ä½Žé€Ÿè¨­å®šã¸èª¿æ•´ã—ãŸå ´åˆã§ã‚‚ã€æ¬¡å¼¾ãŒæ°¸ä¹…ã«ãƒ­ãƒƒã‚¯ã•ã‚Œãªã„ä¿é™ºã€‚
       this.enterFieldFromLane(ball);
     });
   }
 
-  private updateLaunchProgress(): void {
+  private cancelCharge(): void {
+    if (this.state !== 'Charging') return;
+    this.chargeStartedAt = null;
+    this.emit('hajike:power', { ratio: 0 });
+    this.setState('Ready');
+  }
+
+  private updateLaunchProgress(now: number): void {
     if (this.launchedBallId === null) return;
     const launchedBall = this.balls.get(this.launchedBallId);
     if (!launchedBall) {
@@ -256,6 +280,14 @@ export class HajikeScene extends Phaser.Scene {
       return;
     }
 
+    if (!launchedBall.isInLaunchLane) return;
+    const path = GAME_CONFIG.launchLane.path;
+    const projection = projectPointToPath(launchedBall.body.position, path);
+    if (projection.distanceAlong >= this.launchPathDistance + GAME_CONFIG.launchLane.progressEpsilon) {
+      this.launchLastProgressAt = now;
+    }
+    this.launchPathDistance = Math.max(this.launchPathDistance, projection.distanceAlong);
+
     const exit = GAME_CONFIG.launchLane.exitPosition;
     const isAtExit = Phaser.Math.Distance.Between(
       launchedBall.body.position.x,
@@ -263,9 +295,46 @@ export class HajikeScene extends Phaser.Scene {
       exit.x,
       exit.y,
     ) <= GAME_CONFIG.launchLane.exitTriggerRadius;
-    if (launchedBall.isInLaunchLane && isAtExit) {
+    const isNearPathEnd = this.launchPathDistance
+      >= projection.totalLength - GAME_CONFIG.launchLane.exitTriggerRadius;
+    if (isAtExit || isNearPathEnd) {
       this.enterFieldFromLane(launchedBall);
+      return;
     }
+
+    const isOffCenter = projection.distanceToPath > GAME_CONFIG.launchLane.maxCenterlineOffset;
+    const isStalled = now - this.launchLastProgressAt >= GAME_CONFIG.launchLane.stallTimeoutMs;
+    const targetDistance = Math.min(
+      projection.totalLength,
+      this.launchPathDistance + (isStalled
+        ? GAME_CONFIG.launchLane.recoveryAdvance
+        : GAME_CONFIG.launchLane.lookAheadDistance),
+    );
+    const target = pointAlongPath(path, targetDistance);
+
+    if (isOffCenter || isStalled) {
+      this.setBodyPosition(launchedBall.body, target.point);
+      this.setBodyVelocity(launchedBall.body, {
+        x: target.direction.x * GAME_CONFIG.launchLane.laneTravelSpeed,
+        y: target.direction.y * GAME_CONFIG.launchLane.laneTravelSpeed,
+      });
+      this.launchPathDistance = targetDistance;
+      this.launchLastProgressAt = now;
+      return;
+    }
+
+    const dx = target.point.x - launchedBall.body.position.x;
+    const dy = target.point.y - launchedBall.body.position.y;
+    const distance = Math.max(Math.hypot(dx, dy), 1);
+    const desiredVelocity = {
+      x: (dx / distance) * GAME_CONFIG.launchLane.laneTravelSpeed,
+      y: (dy / distance) * GAME_CONFIG.launchLane.laneTravelSpeed,
+    };
+    const steering = GAME_CONFIG.launchLane.steeringStrength;
+    this.setBodyVelocity(launchedBall.body, limitVector({
+      x: Phaser.Math.Linear(launchedBall.body.velocity.x, desiredVelocity.x, steering),
+      y: Phaser.Math.Linear(launchedBall.body.velocity.y, desiredVelocity.y, steering),
+    }, GAME_CONFIG.launchLane.laneTravelSpeed * 1.08));
   }
 
   private enterFieldFromLane(ball: BallEntity): void {
@@ -274,8 +343,8 @@ export class HajikeScene extends Phaser.Scene {
     const entrySpeed = Math.min(
       GAME_CONFIG.maxBodySpeed,
       Math.max(
-        Math.hypot(previousBody.velocity.x, previousBody.velocity.y),
-        (ball.launchSpeed ?? GAME_CONFIG.minLaunchSpeed) * 0.9,
+        GAME_CONFIG.minLaunchSpeed,
+        ball.launchSpeed ?? GAME_CONFIG.minLaunchSpeed,
       ),
     );
     const direction = GAME_CONFIG.launchLane.exitDirection;
@@ -283,20 +352,32 @@ export class HajikeScene extends Phaser.Scene {
     const spawnOffset = GAME_CONFIG.launchLane.exitSpawnOffset;
     this.ballsByBodyId.delete(previousBody.id);
     this.matter.world.remove(previousBody);
+    const entryPosition = containCircleInBounds(
+      {
+        x: exit.x + direction.x * spawnOffset,
+        y: exit.y + direction.y * spawnOffset,
+      },
+      radiusForLevel(ball.level),
+      WORLD.field,
+      GAME_CONFIG.fieldBoundary.containmentPadding,
+    ).position;
     const entryBody = this.createBallBody(
-      exit.x + direction.x * spawnOffset,
-      exit.y + direction.y * spawnOffset,
+      entryPosition.x,
+      entryPosition.y,
       ball.level,
       false,
     );
     ball.body = entryBody;
     this.ballsByBodyId.set(entryBody.id, ball);
     ball.isInLaunchLane = false;
-    this.setBodyVelocity(entryBody, {
+    this.setBodyVelocity(entryBody, limitVector({
       x: direction.x * entrySpeed,
       y: direction.y * entrySpeed,
-    });
+    }, GAME_CONFIG.maxBodySpeed));
+    this.setBodyAngularVelocity(entryBody, ball.level % 2 === 0 ? 0.055 : -0.055);
     if (this.launchedBallId === ball.id) this.launchedBallId = null;
+    this.launchPathDistance = 0;
+    this.launchLastProgressAt = 0;
     if (this.state === 'Launching') this.setState('Ready');
   }
 
@@ -354,581 +435,13 @@ export class HajikeScene extends Phaser.Scene {
 
     ballA.isMerging = true;
     ballB.isMerging = true;
-    const position = {
+    const rawPosition = {
       x: (ballA.body.position.x + ballB.body.position.x) / 2,
-      y: (ballA.body.position.y + ballB.body.position.y) / 2,
-    };
-    const velocity = {
-      x: (ballA.body.velocity.x + ballB.body.velocity.x) / 2,
-      y: (ballA.body.velocity.y + ballB.body.velocity.y) / 2,
-    };
-    this.contactStarts.delete(key);
-    this.removeBall(ballA);
-    this.removeBall(ballB);
-
-    const chainCreatedAtCandidates = [ballA.mergeCreatedAt, ballB.mergeCreatedAt]
-      .filter((createdAt): createdAt is number => createdAt !== null)
-      .filter((createdAt) => now - createdAt <= GAME_CONFIG.comboWindowMs);
-    const chainCreatedAt = chainCreatedAtCandidates.length > 0
-      ? Math.max(...chainCreatedAtCandidates)
-      : null;
-    const mergedBall = this.createBall(position.x, position.y, nextLevel, false, now);
-    this.setBodyVelocity(mergedBall.body, {
-      x: velocity.x,
-      y: velocity.y - GAME_CONFIG.merge.generatedImpulse,
-    });
-    this.setBodyAngularVelocity(mergedBall.body, velocity.x * 0.01);
-
-    this.comboCount = nextComboCount(
-      this.comboCount,
-      chainCreatedAt,
-      now,
-      GAME_CONFIG.comboWindowMs,
-    );
-    const points = calculateMergeScore(nextLevel, this.comboCount);
-    this.score += points;
-    this.bestScore = Math.max(this.bestScore, this.score);
-    saveBestScore(this.bestScore);
-    this.mergeAnimationUntil = Math.max(
-      this.mergeAnimationUntil,
-      now + GAME_CONFIG.merge.postMergeDangerGraceMs,
-    );
-    this.applyShockwave(mergedBall);
-    this.emit('hajike:score', { score: this.score, best: this.bestScore });
-    this.emit('hajike:combo', {
-      count: this.comboCount,
-      multiplier: comboMultiplier(this.comboCount),
-    });
-    this.showBurst(position.x, position.y, BALL_COLORS[nextLevel] ?? BALL_COLORS[1]);
-
-    if (nextLevel === GAME_CONFIG.maxLevel) {
-      this.score += GAME_CONFIG.maxLevelBonus;
-      this.bestScore = Math.max(this.bestScore, this.score);
-      saveBestScore(this.bestScore);
-      this.emit('hajike:score', { score: this.score, best: this.bestScore });
-      this.emit('hajike:effect', { message: 'MAX LEVELï¼ ãƒœãƒ¼ãƒŠã‚¹ï¼' });
-      this.time.delayedCall(GAME_CONFIG.maxLevelExitMs, () => {
-        if (this.balls.has(mergedBall.id)) this.removeBall(mergedBall);
-      });
-    }
-  }
-
-  private updateDangerState(now: number): void {
-    if (this.mergeAnimationUntil > now) {
-      if (this.dangerStartedAt !== null) {
-        this.dangerStartedAt = null;
-        this.emit('hajike:danger', { active: false, progress: 0 });
-      }
-      return;
-    }
-    const dangerBall = [...this.balls.values()].some((ball) => {
-      const speed = Math.hypot(ball.body.velocity.x, ball.body.velocity.y);
-      const isStopped = ball.body.isSleeping || speed <= GAME_CONFIG.stoppedSpeed;
-      const isOverLine = ball.body.position.y - radiusForLevel(ball.level) <= WORLD.dangerLineY;
-      return !ball.isInLaunchLane && !ball.isMerging && isStopped && isOverLine;
-    });
-
-    if (dangerBall) {
-      if (this.dangerStartedAt === null) this.dangerStartedAt = now;
-      const progress = dangerProgress(this.dangerStartedAt, now, GAME_CONFIG.dangerGraceMs);
-      this.emit('hajike:danger', { active: true, progress });
-      if (dangerDurationReached(this.dangerStartedAt, now, GAME_CONFIG.dangerGraceMs)) {
-        this.gameOver();
-      }
-      return;
-    }
-
-    if (this.dangerStartedAt !== null) {
-      this.dangerStartedAt = null;
-      this.emit('hajike:danger', { active: false, progress: 0 });
-    }
-  }
-
-  private gameOver(): void {
-    if (this.state === 'GameOver') return;
-    this.chargeStartedAt = null;
-    this.emit('hajike:charge-cancelled', {});
-    this.setState('GameOver');
-    this.matter.world.pause();
-    const result = updateBestScore(this.score);
-    this.bestScore = result.best;
-    this.emit('hajike:score', { score: this.score, best: this.bestScore });
-    this.emit('hajike:game-over', {
-      score: this.score,
-      best: this.bestScore,
-      isNewBest: result.isNewBest,
-    });
-  }
-
-  private togglePause(): void {
-    if (this.state === 'GameOver') return;
-    if (this.state === 'Paused') {
-      this.resumeGame();
-      return;
-    }
-    this.stateBeforePause = this.state;
-    if (this.state === 'Charging') {
-      this.chargeStartedAt = null;
-      this.emit('hajike:charge-cancelled', {});
-    }
-    this.matter.world.pause();
-    this.setState('Paused');
-  }
-
-  private resumeGame(): void {
-    if (this.state !== 'Paused') return;
-    this.matter.world.resume();
-    this.setState(this.stateBeforePause === 'Charging' ? 'Ready' : this.stateBeforePause);
-  }
-
-  private restartGame(): void {
-    this.scene.restart();
-  }
-
-  private setState(nextState: GameState): void {
-    this.state = nextState;
-    this.emit('hajike:status', { state: nextState });
-    this.emit('hajike:input', { enabled: nextState === 'Ready' });
-  }
-
-  private createBall(
-    x: number,
-    y: number,
-    level: number,
-    isInLaunchLane: boolean,
-    mergeCreatedAt: number | null = null,
-    launchSpeed: number | null = null,
-  ): BallEntity {
-    const id = this.nextBallId;
-    this.nextBallId += 1;
-    const radius = radiusForLevel(level);
-    const body = this.createBallBody(x, y, level, isInLaunchLane);
-    const label = this.add.text(x, y, String(level), {
-      color: '#ffffff',
-      fontFamily: 'Arial, sans-serif',
-      fontSize: `${Math.round(radius * 0.95)}px`,
-      fontStyle: 'bold',
-      stroke: '#14375b',
-      strokeThickness: Math.max(2, Math.round(radius * 0.11)),
-    }).setOrigin(0.5).setDepth(2);
-    const ball: BallEntity = {
-      id,
-      level,
-      body,
-      label,
-      isMerging: false,
-      isInLaunchLane,
-      mergeCreatedAt,
-      launchSpeed,
-    };
-    this.balls.set(id, ball);
-    this.ballsByBodyId.set(body.id, ball);
-    return ball;
-  }
-
-  private createBallBody(x: number, y: number, level: number, isInLaunchLane: boolean): MatterJS.BodyType {
-    const radius = radiusForLevel(level);
-    const launchMask = COLLISION_CATEGORY.ball
-      | COLLISION_CATEGORY.laneWall
-      | COLLISION_CATEGORY.bumper;
-    const fieldMask = COLLISION_CATEGORY.ball
-      | COLLISION_CATEGORY.fieldWall
-      | COLLISION_CATEGORY.bumper
-      | COLLISION_CATEGORY.laneGate;
-    return this.matter.add.circle(x, y, radius, {
-      label: 'hajike-ball',
-      density: 0.001 * massForLevel(level),
-      restitution: GAME_CONFIG.ball.restitution,
-      friction: GAME_CONFIG.ball.friction,
-      frictionAir: GAME_CONFIG.ball.frictionAir,
-      slop: 0.02,
-      sleepThreshold: GAME_CONFIG.ball.sleepThreshold,
-      collisionFilter: {
-        category: COLLISION_CATEGORY.ball,
-        mask: isInLaunchLane ? launchMask : fieldMask,
-      },
-    });
-  }
-
-  private removeBall(ball: BallEntity): void {
-    this.balls.delete(ball.id);
-    this.ballsByBodyId.delete(ball.body.id);
-    ball.label.destroy();
-    this.matter.world.remove(ball.body);
-    for (const key of this.contactStarts.keys()) {
-      const [firstId, secondId] = key.split(':').map(Number);
-      if (firstId === ball.id || secondId === ball.id) this.contactStarts.delete(key);
-    }
-  }
-
-  private createStaticBodies(): void {
-    const addWall = (
-      x: number,
-      y: number,
-      width: number,
-      height: number,
-      restitution: number,
-      friction: number,
-      label: string,
-      category: number,
-    ): void => {
-      const wall = this.matter.add.rectangle(x, y, width, height, {
-        isStatic: true,
-        label,
-        restitution,
-        friction,
-        collisionFilter: {
-          category,
-          mask: COLLISION_CATEGORY.ball,
-        },
-      });
-      this.staticBodies.push(wall);
-    };
-
-    const fieldMidX = (WORLD.field.left + WORLD.field.right) / 2;
-    const fieldMidY = (WORLD.field.top + WORLD.field.bottom) / 2;
-    addWall(WORLD.field.left - 8, fieldMidY, 16, WORLD.field.bottom - WORLD.field.top + 40, GAME_CONFIG.wall.restitution, GAME_CONFIG.wall.friction, 'field-left-wall', COLLISION_CATEGORY.fieldWall);
-    // ãƒ•ã‚£ãƒ¼ãƒ«ãƒ‰å´ã¯ä¸Šç«¯ã¾ã§é€£ç¶šã—ãŸå£ã«ã—ã¦ã€é€²å…¥æ¸ˆã¿ã®çƒãŒãƒ¬ãƒ¼ãƒ³ã¸æˆ»ã‚‰ãªã„ã‚ˆã†ã«ã™ã‚‹ã€‚
-    addWall(WORLD.field.right + 8, (WORLD.field.top + WORLD.field.bottom) / 2, 16, WORLD.field.bottom - WORLD.field.top + 40, GAME_CONFIG.wall.restitution, GAME_CONFIG.wall.friction, 'field-right-wall', COLLISION_CATEGORY.fieldWall);
-    addWall(fieldMidX, WORLD.field.bottom + 8, WORLD.field.right - WORLD.field.left + 32, 16, GAME_CONFIG.floor.restitution, GAME_CONFIG.floor.friction, 'field-floor', COLLISION_CATEGORY.fieldWall);
-    addWall(fieldMidX, WORLD.field.top - 8, WORLD.field.right - WORLD.field.left + 32, 16, GAME_CONFIG.wall.restitution, GAME_CONFIG.wall.friction, 'field-top-wall', COLLISION_CATEGORY.fieldWall);
-    this.createCurvedLaunchLaneWalls();
-  }
-
-  private laneDirection(segmentIndex: number): VectorLike {
-    const path = GAME_CONFIG.launchLane.path;
-    const startIndex = Math.max(0, Math.min(segmentIndex, path.length - 2));
-    const start = path[startIndex];
-    const end = path[startIndex + 1];
-    const distance = Math.max(Math.hypot(end.x - start.x, end.y - start.y), 1);
-    return {
-      x: (end.x - start.x) / distance,
-      y: (end.y - start.y) / distance,
-    };
-  }
-
-  private addLaneSegment(start: VectorLike, end: VectorLike, label: string): void {
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const length = Math.max(Math.hypot(dx, dy), GAME_CONFIG.launchLane.wallThickness);
-    const body = this.matter.add.rectangle(
-      (start.x + end.x) / 2,
-      (start.y + end.y) / 2,
-      length + GAME_CONFIG.launchLane.segmentOverlap,
-      GAME_CONFIG.launchLane.wallThickness,
-      {
-        isStatic: true,
-        angle: Math.atan2(dy, dx),
-        label,
-        restitution: GAME_CONFIG.wall.restitution,
-        friction: GAME_CONFIG.wall.friction,
-        collisionFilter: {
-          category: COLLISION_CATEGORY.laneWall,
-          mask: COLLISION_CATEGORY.ball,
-        },
-      },
-    );
-    this.staticBodies.push(body);
-  }
-
-  private createCurvedLaunchLaneWalls(): void {
-    const path = GAME_CONFIG.launchLane.path;
-    const halfWidth = GAME_CONFIG.launchLane.corridorWidth / 2;
-    const leftPoints: VectorLike[] = [];
-    const rightPoints: VectorLike[] = [];
-
-    for (let index = 0; index < path.length; index += 1) {
-      const direction = this.laneDirection(Math.min(index, path.length - 2));
-      if (index === path.length - 1) {
-        const previousDirection = this.laneDirection(path.length - 2);
-        direction.x = previousDirection.x;
-        direction.y = previousDirection.y;
-      }
-      const normal = { x: -direction.y, y: direction.x };
-      leftPoints.push({
-        x: path[index].x + normal.x * halfWidth,
-        y: path[index].y + normal.y * halfWidth,
-      });
-      rightPoints.push({
-        x: path[index].x - normal.x * halfWidth,
-        y: path[index].y - normal.y * halfWidth,
-      });
-    }
-
-    for (let index = 0; index < path.length - 1; index += 1) {
-      this.addLaneSegment(leftPoints[index], leftPoints[index + 1], 'launch-lane-left-wall');
-      this.addLaneSegment(rightPoints[index], rightPoints[index + 1], 'launch-lane-right-wall');
-    }
-
-    for (const point of [...leftPoints, ...rightPoints]) {
-      const joint = this.matter.add.circle(
-        point.x,
-        point.y,
-        GAME_CONFIG.launchLane.jointRadius,
-        {
-          isStatic: true,
-          label: 'launch-lane-rounded-joint',
-          restitution: GAME_CONFIG.wall.restitution,
-          friction: GAME_CONFIG.wall.friction,
-          collisionFilter: {
-            category: COLLISION_CATEGORY.laneWall,
-            mask: COLLISION_CATEGORY.ball,
-          },
-        },
-      );
-      this.staticBodies.push(joint);
-    }
-
-    this.addLaneSegment(leftPoints[0], rightPoints[0], 'launch-lane-start-cap');
-
-    const exit = GAME_CONFIG.launchLane.exitPosition;
-    const exitGate = this.matter.add.rectangle(
-      exit.x,
-      exit.y,
-      GAME_CONFIG.launchLane.gateWidth,
-      GAME_CONFIG.launchLane.gateThickness,
-      {
-        isStatic: true,
-        angle: GAME_CONFIG.launchLane.exitAngleRadians + Math.PI / 2,
-        label: 'launch-lane-one-way-gate',
-        restitution: GAME_CONFIG.wall.restitution,
-        friction: GAME_CONFIG.wall.friction,
-        collisionFilter: {
-          category: COLLISION_CATEGORY.laneGate,
-          mask: COLLISION_CATEGORY.ball,
-        },
-      },
-    );
-    this.staticBodies.push(exitGate);
-  }
-
-  private createBumpers(): void {
-    const positions = [
-      { x: 220, y: 375 },
-      { x: 420, y: 375 },
-      { x: 320, y: 580 },
-    ];
-    for (const position of positions) {
-      const body = this.matter.add.circle(position.x, position.y, GAME_CONFIG.bumper.radius, {
-        isStatic: true,
-        label: 'hajike-bumper',
-        restitution: GAME_CONFIG.bumper.restitution,
-        friction: GAME_CONFIG.bumper.friction,
-        collisionFilter: {
-          category: COLLISION_CATEGORY.bumper,
-          mask: COLLISION_CATEGORY.ball,
-        },
-      });
-      this.bumpers.set(body.id, {
-        body,
-        x: position.x,
-        y: position.y,
-        pulseUntil: 0,
-      });
-    }
-  }
-
-  private hitBumper(bumper: BumperEntity, ball: BallEntity, now: number): void {
-    if (ball.isMerging) return;
-    const cooldownKey = `${ball.id}:${bumper.body.id}`;
-    const lastHitAt = this.bumperHitCooldowns.get(cooldownKey) ?? Number.NEGATIVE_INFINITY;
-    if (now - lastHitAt < GAME_CONFIG.bumper.scoreCooldownMs) return;
-    this.bumperHitCooldowns.set(cooldownKey, now);
-    bumper.pulseUntil = now + GAME_CONFIG.bumper.pulseDurationMs;
-    const dx = ball.body.position.x - bumper.x;
-    const dy = ball.body.position.y - bumper.y;
-    const distance = Math.max(Math.hypot(dx, dy), 1);
-    const normal = { x: dx / distance, y: dy / distance };
-    const impactSpeed = Math.hypot(ball.body.velocity.x, ball.body.velocity.y);
-    const points = calculateBumperHitScore(impactSpeed);
-    this.setBodyVelocity(ball.body, {
-      x: ball.body.velocity.x + normal.x * GAME_CONFIG.bumper.impulse,
-      y: ball.body.velocity.y + normal.y * GAME_CONFIG.bumper.impulse,
-    });
-    this.score += points;
-    this.bestScore = Math.max(this.bestScore, this.score);
-    saveBestScore(this.bestScore);
-    if (this.lastLaunchBumperId !== bumper.body.id) {
-      this.launchBumperHitCount += 1;
-      this.lastLaunchBumperId = bumper.body.id;
-    }
-    this.emit('hajike:score', { score: this.score, best: this.bestScore });
-    this.emit('hajike:bumper-hit', {
-      count: this.launchBumperHitCount,
-      points,
-      impactSpeed,
-    });
-    this.showBurst(bumper.x + normal.x * 24, bumper.y + normal.y * 24, 0xbfeeff, 5);
-  }
-
-  private applyShockwave(source: BallEntity): void {
-    const multiplier = GAME_CONFIG.mergeShockwave.levelMultipliers[source.level] ?? 1;
-    const multiplierProgress = Math.min(Math.max((multiplier - 1) / 3, 0), 1);
-    const impulse = GAME_CONFIG.mergeShockwave.minImpulse
-      + (GAME_CONFIG.mergeShockwave.maxImpulse - GAME_CONFIG.mergeShockwave.minImpulse)
-        * multiplierProgress ** 1.25;
-    const radius = GAME_CONFIG.mergeShockwave.minRadius
-      + (GAME_CONFIG.mergeShockwave.maxRadius - GAME_CONFIG.mergeShockwave.minRadius)
-        * multiplierProgress ** 0.85;
-
-    for (const ball of this.balls.values()) {
-      if (ball.id === source.id || ball.isInLaunchLane || ball.isMerging) continue;
-      const dx = ball.body.position.x - source.body.position.x;
-      const dy = ball.body.position.y - source.body.position.y;
-      const distance = Math.hypot(dx, dy);
-      if (distance > radius || distance < 1) continue;
-      const falloff = (1 - distance / radius) ** GAME_CONFIG.mergeShockwave.falloffExponent;
-      const scale = impulse * falloff;
-      this.setBodyVelocity(ball.body, {
-        x: ball.body.velocity.x + (dx / distance) * scale,
-        y: ball.body.velocity.y + (dy / distance) * scale,
-      });
-      this.capBodySpeed(ball.body);
-    }
-  }
-
-  private capAllBodySpeeds(): void {
-    for (const ball of this.balls.values()) this.capBodySpeed(ball.body);
-  }
-
-  private capBodySpeed(body: MatterJS.BodyType): void {
-    const speed = Math.hypot(body.velocity.x, body.velocity.y);
-    if (speed <= GAME_CONFIG.maxBodySpeed || speed < 0.001) return;
-    const scale = GAME_CONFIG.maxBodySpeed / speed;
-    this.setBodyVelocity(body, {
-      x: body.velocity.x * scale,
-      y: body.velocity.y * scale,
-    });
-  }
-
-  private setBodyVelocity(body: MatterJS.BodyType, velocity: VectorLike): void {
-    this.matter.body.setVelocity(body, velocity);
-  }
-
-  private setBodyAngularVelocity(body: MatterJS.BodyType, velocity: number): void {
-    this.matter.body.setAngularVelocity(body, velocity);
-  }
-
-  private drawBoard(): void {
-    this.boardGraphics.clear();
-    this.boardGraphics.fillStyle(0x08234a, 1);
-    this.boardGraphics.fillRoundedRect(55, 60, 610, 1130, 32);
-    this.boardGraphics.lineStyle(6, 0x4a7caa, 0.45);
-    this.boardGraphics.strokeRoundedRect(55, 60, 610, 1130, 32);
-    this.boardGraphics.fillStyle(0x132f5b, 1);
-    this.boardGraphics.fillRoundedRect(WORLD.field.left, WORLD.field.top + 12, WORLD.field.right - WORLD.field.left, WORLD.field.bottom - WORLD.field.top - 12, 16);
-    this.boardGraphics.lineStyle(4, 0x5d92c1, 0.7);
-    this.boardGraphics.strokeRoundedRect(WORLD.field.left, WORLD.field.top + 12, WORLD.field.right - WORLD.field.left, WORLD.field.bottom - WORLD.field.top - 12, 16);
-    const lanePath = GAME_CONFIG.launchLane.path;
-    this.boardGraphics.lineStyle(GAME_CONFIG.launchLane.corridorWidth, 0x163f70, 1);
-    for (let index = 0; index < lanePath.length - 1; index += 1) {
-      this.boardGraphics.lineBetween(
-        lanePath[index].x,
-        lanePath[index].y,
-        lanePath[index + 1].x,
-        lanePath[index + 1].y,
-      );
-    }
-    this.boardGraphics.lineStyle(4, 0x67b9ec, 0.8);
-    for (let index = 0; index < lanePath.length - 1; index += 1) {
-      this.boardGraphics.lineBetween(
-        lanePath[index].x,
-        lanePath[index].y,
-        lanePath[index + 1].x,
-        lanePath[index + 1].y,
-      );
-    }
-    this.boardGraphics.fillStyle(0xa3dfff, 0.65);
-    this.boardGraphics.fillCircle(
-      GAME_CONFIG.launchLane.exitPosition.x,
-      GAME_CONFIG.launchLane.exitPosition.y,
-      7,
-    );
-    this.boardGraphics.lineStyle(2, 0xff5b60, 0.28);
-    this.boardGraphics.lineBetween(WORLD.field.left + 8, WORLD.dangerLineY, WORLD.field.right - 8, WORLD.dangerLineY);
-  }
-
-  private renderWorld(): void {
-    const now = this.time.now;
-    this.ballGraphics.clear();
-    this.fxGraphics.clear();
-
-    for (const bumper of this.bumpers.values()) {
-      const pulse = bumper.pulseUntil > now ? 1 + ((bumper.pulseUntil - now) / 180) * 0.2 : 1;
-      this.ballGraphics.fillStyle(0x4aa7dd, 1);
-      this.ballGraphics.fillCircle(bumper.x, bumper.y, GAME_CONFIG.bumper.radius * pulse);
-      this.ballGraphics.lineStyle(5, 0x8fdcff, 0.95);
-      this.ballGraphics.strokeCircle(bumper.x, bumper.y, GAME_CONFIG.bumper.radius * pulse);
-      this.ballGraphics.fillStyle(0xe8fbff, 0.9);
-      this.ballGraphics.fillCircle(bumper.x - 10, bumper.y - 10, 9 * pulse);
-      this.ballGraphics.fillStyle(0x1b5d91, 0.95);
-      this.ballGraphics.fillCircle(bumper.x + 4, bumper.y + 5, 6 * pulse);
-    }
-
-    for (const ball of this.balls.values()) {
-      const position = ball.body.position;
-      const radius = radiusForLevel(ball.level);
-      const color = BALL_COLORS[ball.level] ?? BALL_COLORS[1];
-      const alpha = ball.isInLaunchLane ? 0.92 : 1;
-      this.ballGraphics.fillStyle(color, alpha);
-      this.ballGraphics.fillCircle(position.x, position.y, radius);
-      this.ballGraphics.lineStyle(3, 0x071c39, 0.68);
-      this.ballGraphics.strokeCircle(position.x, position.y, radius);
-      this.ballGraphics.fillStyle(0xffffff, 0.2);
-      this.ballGraphics.fillCircle(position.x - radius * 0.32, position.y - radius * 0.34, radius * 0.2);
-      ball.label.setPosition(position.x, position.y);
-    }
-  }
-
-  private showBurst(x: number, y: number, color: number, particleCount = 8): void {
-    const ring = this.add.circle(x, y, 12, color, 0.18).setStrokeStyle(4, color, 0.9).setDepth(4);
-    this.tweens.add({
-      targets: ring,
-      scale: 4,
-      alpha: 0,
-      duration: 340,
-      ease: 'Cubic.Out',
-      onComplete: () => ring.destroy(),
-    });
-
-    for (let index = 0; index < particleCount; index += 1) {
-      const angle = (Math.PI * 2 * index) / particleCount;
-      const distance = 22 + (index % 3) * 9;
-      const particle = this.add.circle(x, y, 4, color, 0.9).setDepth(4);
-      this.tweens.add({
-        targets: particle,
-        x: x + Math.cos(angle) * distance,
-        y: y + Math.sin(angle) * distance,
-        scale: 0.2,
-        alpha: 0,
-        duration: 380,
-        ease: 'Cubic.Out',
-        onComplete: () => particle.destroy(),
-      });
-    }
-  }
-
-  private contactKey(firstId: number, secondId: number): string {
-    return firstId < secondId ? `${firstId}:${secondId}` : `${secondId}:${firstId}`;
-  }
-
-  private emit(name: string, detail: unknown): void {
-    window.dispatchEvent(new CustomEvent(name, { detail }));
-  }
-
-  private handleShutdown(): void {
-    window.removeEventListener('hajike:action', this.actionHandler);
-    window.removeEventListener('hajike:charge-start', this.chargeStartHandler);
-    window.removeEventListener('hajike:charge-end', this.chargeEndHandler);
-    this.matter.world.off('collisionstart', this.collisionStartHandler);
-    this.matter.world.off('collisionend', this.collisionEndHandler);
-    this.contactStarts.clear();
-    this.bumperHitCooldowns.clear();
-    this.balls.clear();
-    this.ballsByBodyId.clear();
-    this.bumpers.clear();
-    this.launchBumperHitCount = 0;
-    this.lastLaunchBumperId = null;
-    this.staticBodies.length = 0;
-  }
-}
+      y: (ballA.ß}:¶‰žËkºwµçI¥Ù…Ñ”±…¹•Q…¹•¹ÑÑA½¥¹Ð¡Á½¥¹Ñ%¹‘•àè¹Õµ‰•È¤èY•Ñ½É1¥­”ì(€€€½¹ÍÐÁ…Ñ €ô5}=9%¹±…Õ¹¡1…¹”¹Á…Ñ ì(€€€¥˜€¡Á½¥¹Ñ%¹‘•à€ðô€À¤É•ÑÕÉ¸Ñ¡¥Ì¹±…¹•¥É•Ñ¥½¸ À¤ì(€€€¥˜€¡Á½¥¹Ñ%¹‘•à€øôÁ…Ñ ¹±•¹Ñ €´€Ä¤É•ÑÕÉ¸Ñ¡¥Ì¹±…¹•¥É•Ñ¥½¸¡Á…Ñ ¹±•¹Ñ €´€È¤ì(€€€½¹ÍÐÁÉ•Ù¥½ÕÌ€ôÑ¡¥Ì¹±…¹•¥É•Ñ¥½¸¡Á½¥¹Ñ%¹‘•à€´€Ä¤ì(€€€½¹ÍÐ¹•áÐ€ôÑ¡¥Ì¹±…¹•¥É•Ñ¥½¸¡Á½¥¹Ñ%¹‘•à¤ì(€€€½¹ÍÐ±•¹Ñ €ô5…Ñ ¹µ…à¡5…Ñ ¹¡åÁ½Ð¡ÁÉ•Ù¥½ÕÌ¹à€¬¹•áÐ¹à°ÁÉ•Ù¥½ÕÌ¹ä€¬¹•áÐ¹ä¤°€Ä¤ì(€€€É•ÑÕÉ¸ì(€€€€€àè€¡ÁÉ•Ù¥½ÕÌ¹à€¬¹•áÐ¹à¤€¼±•¹Ñ °(€€€€€äè€¡ÁÉ•Ù¥½ÕÌ¹ä€¬¹•áÐ¹ä¤€¼±•¹Ñ °(€€€ôì(€ô((€ÁÉ¥Ù…Ñ”…‘‘1…¹•M•µ•¹Ð¡ÍÑ…ÉÐèY•Ñ½É1¥­”°•¹èY•Ñ½É1¥­”°±…‰•°èÍÑÉ¥¹œ¤èÙ½¥ì(€€€½¹ÍÐ‘à€ô•¹¹à€´ÍÑ…ÉÐ¹àì(€€€½¹ÍÐ‘ä€ô•¹¹ä€´ÍÑ…ÉÐ¹äì(€€€½¹ÍÐ±•¹Ñ €ô5…Ñ ¹µ…à¡5…Ñ ¹¡åÁ½Ð¡‘à°‘ä¤°5}=9%¹±…Õ¹¡1…¹”¹Ý…±±Q¡¥­¹•ÍÌ¤ì(€€€½¹ÍÐ‰½‘ä€ôÑ¡¥Ì¹µ…ÑÑ•È¹…‘¹É•Ñ…¹±” (€€€€€€¡ÍÑ…ÉÐ¹à€¬•¹¹à¤€¼€È°(€€€€€€¡ÍÑ…ÉÐ¹ä€¬•¹¹ä¤€¼€È°(€€€€€±•¹Ñ €¬5}=9%¹±…Õ¹¡1…¹”¹Í•µ•¹Ñ=Ù•É±…À°(€€€€€5}=9%¹±…Õ¹¡1…¹”¹Ý…±±Q¡¥­¹•ÍÌ°(€€€€€ì(€€€€€€€¥ÍMÑ…Ñ¥ŒèÑÉÕ”°(€€€€€€€…¹±”è5…Ñ ¹…Ñ…¸È¡‘ä°‘à¤°(€€€€€€€±…‰•°°(€€€€€€€É•ÍÑ¥ÑÕÑ¥½¸è5}=9%¹Ý…±°¹É•ÍÑ¥ÑÕÑ¥½¸°(€€€€€€€™É¥Ñ¥½¸è5}=9%¹Ý…±°¹™É¥Ñ¥½¸°(€€€€€€€½±±¥Í¥½¹¥±Ñ•Èèì(€€€€€€€€€…Ñ•½Éäè=11%M%=9}Q=Id¹±…¹•]…±°°(€€€€€€€€€µ…Í¬è=11%M%=9}Q=Id¹‰…±°°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€Ñ¡¥Ì¹ÍÑ…Ñ¥	½‘¥•Ì¹ÁÕÍ ¡‰½‘ä¤ì(€ô((€ÁÉ¥Ù…Ñ”É•…Ñ•ÕÉÙ•‘1…Õ¹¡1…¹•]…±±Ì ¤èÙ½¥ì(€€€½¹ÍÐÁ…Ñ €ô5}=9%¹±…Õ¹¡1…¹”¹Á…Ñ ì(€€€½¹ÍÐ¡…±™]¥‘Ñ €ô5}=9%¹±…Õ¹¡1…¹”¹½ÉÉ¥‘½É]¥‘Ñ €¼€Èì(€€€½¹ÍÐ±•™ÑA½¥¹ÑÌèY•Ñ½É1¥­•mt€ômtì(€€€½¹ÍÐÉ¥¡ÑA½¥¹ÑÌèY•Ñ½É1¥­•mt€ômtì((€€€™½È€¡±•Ð¥¹‘•à€ô€Àì¥¹‘•à€ðÁ…Ñ ¹±•¹Ñ ì¥¹‘•à€¬ô€Ä¤ì(€€€€€½¹ÍÐ‘¥É•Ñ¥½¸€ôÑ¡¥Ì¹±…¹•Q…¹•¹ÑÑA½¥¹Ð¡¥¹‘•à¤ì(€€€€€½¹ÍÐ¹½Éµ…°€ôìàè€µ‘¥É•Ñ¥½¸¹ä°äè‘¥É•Ñ¥½¸¹àôì(€€€€€±•™ÑA½¥¹ÑÌ¹ÁÕÍ ¡ì(€€€€€€€àèÁ…Ñ¡m¥¹‘•át¹à€¬¹½Éµ…°¹à€¨¡…±™]¥‘Ñ °(€€€€€€€äèÁ…Ñ¡m¥¹‘•át¹ä€¬¹½Éµ…°¹ä€¨¡…±™]¥‘Ñ °(€€€€€ô¤ì(€€€€€É¥¡ÑA½¥¹ÑÌ¹ÁÕÍ ¡ì(€€€€€€€àèÁ…Ñ¡m¥¹‘•át¹à€´¹½Éµ…°¹à€¨¡…±™]¥‘Ñ °(€€€€€€€äèÁ…Ñ¡m¥¹‘•át¹ä€´¹½Éµ…°¹ä€¨¡…±™]¥‘Ñ °(€€€€€ô¤ì(€€€ô((€€€™½È€¡±•Ð¥¹‘•à€ô€Àì¥¹‘•à€ðÁ…Ñ ¹±•¹Ñ €´€Äì¥¹‘•à€¬ô€Ä¤ì(€€€€€Ñ¡¥Ì¹…‘‘1…¹•M•µ•¹Ð¡±•™ÑA½¥¹ÑÍm¥¹‘•át°±•™ÑA½¥¹ÑÍm¥¹‘•à€¬€Åt°€±…Õ¹ µ±…¹”µ±•™ÐµÝ…±°œ¤ì(€€€€€Ñ¡¥Ì¹…‘‘1…¹•M•µ•¹Ð¡É¥¡ÑA½¥¹ÑÍm¥¹‘•át°É¥¡ÑA½¥¹ÑÍm¥¹‘•à€¬€Åt°€±…Õ¹ µ±…¹”µÉ¥¡ÐµÝ…±°œ¤ì(€€€ô((€€€™½È€¡½¹ÍÐÁ½¥¹Ð½˜l¸¸¹±•™ÑA½¥¹ÑÌ°€¸¸¹É¥¡ÑA½¥¹ÑÍt¤ì(€€€€€½¹ÍÐ©½¥¹Ð€ôÑ¡¥Ì¹µ…ÑÑ•È¹…‘¹¥É±” (€€€€€€€Á½¥¹Ð¹à°(€€€€€€€Á½¥¹Ð¹ä°(€€€€€€€5}=9%¹±…Õ¹¡1…¹”¹©½¥¹ÑI…‘¥ÕÌ°(€€€€€€€ì(€€€€€€€€€¥ÍMÑ…Ñ¥ŒèÑÉÕ”°(€€€€€€€€€±…‰•°è€±…Õ¹ µ±…¹”µÉ½Õ¹‘•µ©½¥¹Ðœ°(€€€€€€€€€É•ÍÑ¥ÑÕÑ¥½¸è5}=9%¹Ý…±°¹É•ÍÑ¥ÑÕÑ¥½¸°(€€€€€€€€€™É¥Ñ¥½¸è5}=9%¹Ý…±°¹™É¥Ñ¥½¸°(€€€€€€€€€½±±¥Í¥½¹¥±Ñ•Èèì(€€€€€€€€€€€…Ñ•½Éäè=11%M%=9}Q=Id¹±…¹•]…±°°(€€€€€€€€€€€µ…Í¬è=11%M%=9}Q=Id¹‰…±°°(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€€¤ì(€€€€€Ñ¡¥Ì¹ÍÑ…Ñ¥	½‘¥•Ì¹ÁÕÍ ¡©½¥¹Ð¤ì(€€€ô((€€€Ñ¡¥Ì¹…‘‘1…¹•M•µ•¹Ð¡±•™ÑA½¥¹ÑÍlÁt°É¥¡ÑA½¥¹ÑÍlÁt°€±…Õ¹ µ±…¹”µÍÑ…ÉÐµ…Àœ¤ì((€€€½¹ÍÐ•á¥Ð€ô5}=9%¹±…Õ¹¡1…¹”¹•á¥ÑA½Í¥Ñ¥½¸ì(€€€€¼¼ƒŽ
+ïŽÏŽ
+×ŽóŽ¿–ë–>š’sž~—žR£Ž¦Ë–—–ú3Ž¿¢†wžªŽ
+¯ŽŽ
+ÓŽ«Ž
+I™¥•±“Žã–"Ž
++šnÿŽ#Ž(€€€€¼¼ƒ¦žÚkŽ_Ž–>Ï–ŽŽŸŽ³ŽóŽÏŽãŽ»¦šÖŽ
+Kž&§žBžjŽ¯¦bËŽCŽ(€€€½¹ÍÐ•á¥Ñ…Ñ”€ôÑ¡¥Ì¹µ…ÑÑ•È¹…‘¹É•Ñ…¹±” (€€€€€•á¥Ð¹à°(€€€€€•á¥Ð¹ä°(€€€€€5}=9%¹±…Õ¹¡1…¹”¹…Ñ•]¥‘Ñ °(€€€€€5}=9%¹±…Õ¹¡1…¹”¹…Ñ•Q¡¥­¹•ÍÌ°(€€€€€ì(€€€€€€€¥ÍMÑ…Ñ¥ŒèÑÉÕ”°(€€€€€€€¥ÍM•¹Í½ÈèÑÉÕ”°(€€€€€€€…¹±”è5}=9%¹±…Õ¹¡1…¹”¹•á¥Ñ¹±•I…‘¥…¹Ì€¬5…Ñ ¹A$€¼€È°(€€€€€€€±…‰•°è€±…Õ¹ µ±…¹”µ½¹”µÝ…äµ…Ñ”œ°(€€€€€€€½±±¥Í¥½¹¥±Ñ•Èèì(€€€€€€€€€…Ñ•½Éäè=11%M%=9}Q=Id¹±…¹•…Ñ”°(€€€€€€€€€µ…Í¬è=11%M%=9}Q=Id¹‰…±°°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€Ñ¡¥Ì¹ÍÑ…Ñ¥	½‘¥•Ì¹ÁÕÍ ¡•á¥Ñ…Ñ”¤ì(€ô((€ÁÉ¥Ù…Ñ”É•…Ñ•	ÕµÁ•ÉÌ ¤èÙ½¥ì(€€€½¹ÍÐÁ½Í¥Ñ¥½¹Ì€ôl(€€€€€ìàè€ÈÈÀ°äè€ÌÜÔô°(€€€€€ìàè€ÐÈÀ°äè€ÌÜÔô°(€€€€€ìàè€ÌÈÀ°äè€ÔàÀô°(€€€tì(€€€™½È€¡½¹ÍÐÁ½Í¥Ñ¥½¸½˜Á½Í¥Ñ¥½¹Ì¤ì(€€€€€½¹ÍÐ‰½‘ä€ôÑ¡¥Ì¹µ…ÑÑ•È¹…‘¹¥É±”¡Á½Í¥Ñ¥½¸¹à°Á½Í¥Ñ¥½¸¹ä°5}=9%¹‰ÕµÁ•È¹É…‘¥ÕÌ°ì(€€€€€€€¥ÍMÑ…Ñ¥ŒèÑÉÕ”°(€€€€€€€±…‰•°è€¡…©¥­”µ‰ÕµÁ•Èœ°(€€€€€€€É•ÍÑ¥ÑÕÑ¥½¸è5}=9%¹‰ÕµÁ•È¹É•ÍÑ¥ÑÕÑ¥½¸°(€€€€€€€™É¥Ñ¥½¸è5}=9%¹‰ÕµÁ•È¹™É¥Ñ¥½¸°(€€€€€€€½±±¥Í¥½¹¥±Ñ•Èèì(€€€€€€€€€…Ñ•½Éäè=11%M%=9}Q=Id¹‰ÕµÁ•È°(€€€€€€€€€µ…Í¬è=11%M%=9}Q=Id¹‰…±°°(€€€€€€€ô°(€€€€€ô¤ì(€€€€€Ñ¡¥Ì¹‰ÕµÁ•ÉÌ¹Í•Ð¡‰½‘ä¹¥°ì(€€€€€€€‰½‘ä°(€€€€€€€àèÁ½Í¥Ñ¥½¸¹à°(€€€€€€€äèÁ½Í¥Ñ¥½¸¹ä°(€€€€€€€ÁÕ±Í•U¹Ñ¥°è€À°(€€€€€ô¤ì(€€€ô(€ô((€ÁÉ¥Ù…Ñ”¡¥Ñ	ÕµÁ•È¡‰ÕµÁ•Èè	ÕµÁ•É¹Ñ¥Ñä°‰…±°è	…±±¹Ñ¥Ñä°¹½Üè¹Õµ‰•È¤èÙ½¥ì(€€€¥˜€¡‰…±°¹¥Í5•É¥¹œ¤É•ÑÕÉ¸ì(€€€½¹ÍÐ½½±‘½Ý¹-•ä€ô€‘í‰…±°¹¥‘ôè‘í‰ÕµÁ•È¹‰½‘ä¹¥‘õ€ì(€€€½¹ÍÐ±…ÍÑ!¥ÑÐ€ôÑ¡¥Ì¹‰ÕµÁ•É!¥Ñ½½±‘½Ý¹Ì¹•Ð¡½½±‘½Ý¹-•ä¤€üü9Õµ‰•È¹9Q%Y}%9%9%Qdì(€€€¥˜€¡¹½Ü€´±…ÍÑ!¥ÑÐ€ð5}=9%¹‰ÕµÁ•È¹Í½É•½½±‘½Ý¹5Ì¤É•ÑÕÉ¸ì(€€€Ñ¡¥Ì¹‰ÕµÁ•É!¥Ñ½½±‘½Ý¹Ì¹Í•Ð¡½½±‘½Ý¹-•ä°¹½Ü¤ì(€€€‰ÕµÁ•È¹ÁÕ±Í•U¹Ñ¥°€ô¹½Ü€¬5}=9%¹‰ÕµÁ•È¹ÁÕ±Í•ÕÉ…Ñ¥½¹5Ìì(€€€½¹ÍÐ‘à€ô‰…±°¹‰½‘ä¹Á½Í¥Ñ¥½¸¹à€´‰ÕµÁ•È¹àì(€€€½¹ÍÐ‘ä€ô‰…±°¹‰½‘ä¹Á½Í¥Ñ¥½¸¹ä€´‰ÕµÁ•È¹äì(€€€½¹ÍÐ‘¥ÍÑ…¹”€ô5…Ñ ¹µ…à¡5…Ñ ¹¡åÁ½Ð¡‘à°‘ä¤°€Ä¤ì(€€€½¹ÍÐ¹½Éµ…°€ôìàè‘à€¼‘¥ÍÑ…¹”°äè‘ä€¼‘¥ÍÑ…¹”ôì(€€€½¹ÍÐ¥µÁ…ÑMÁ••€ô5…Ñ ¹¡åÁ½Ð¡‰…±°¹‰½‘ä¹Ù•±½¥Ñä¹à°‰…±°¹‰½‘ä¹Ù•±½¥Ñä¹ä¤ì(€€€½¹ÍÐÁ½¥¹ÑÌ€ô…±Õ±…Ñ•	ÕµÁ•É!¥ÑM½É”¡¥µÁ…ÑMÁ••¤ì(€€€Ñ¡¥Ì¹Í•Ñ	½‘åY•±½¥Ñä¡‰…±°¹‰½‘ä°ì(€€€€€àè‰…±°¹‰½‘ä¹Ù•±½¥Ñä¹à€¬¹½Éµ…°¹à€¨5}=9%¹‰ÕµÁ•È¹¥µÁÕ±Í”°(€€€€€äè‰…±°¹‰½‘ä¹Ù•±½¥Ñä¹ä€¬¹½Éµ…°¹ä€¨5}=9%¹‰ÕµÁ•È¹¥µÁÕ±Í”°(€€€ô¤ì(€€€Ñ¡¥Ì¹Í½É”€¬ôÁ½¥¹ÑÌì(€€€Ñ¡¥Ì¹‰•ÍÑM½É”€ô5…Ñ ¹µ…à¡Ñ¡¥Ì¹‰•ÍÑM½É”°Ñ¡¥Ì¹Í½É”¤ì(€€€Í…Ù•	•ÍÑM½É”¡Ñ¡¥Ì¹‰•ÍÑM½É”¤ì(€€€¥˜€¡Ñ¡¥Ì¹±…ÍÑ1…Õ¹¡	ÕµÁ•É%€„ôô‰ÕµÁ•È¹‰½‘ä¹¥¤ì(€€€€€Ñ¡¥Ì¹±…Õ¹¡	ÕµÁ•É!¥Ñ½Õ¹Ð€¬ô€Äì(€€€€€Ñ¡¥Ì¹±…ÍÑ1…Õ¹¡	ÕµÁ•É%€ô‰ÕµÁ•È¹‰½‘ä¹¥ì(€€€ô(€€€Ñ¡¥Ì¹•µ¥Ð ¡…©¥­”éÍ½É”œ°ìÍ½É”èÑ¡¥Ì¹Í½É”°‰•ÍÐèÑ¡¥Ì¹‰•ÍÑM½É”ô¤ì(€€€Ñ¡¥Ì¹•µ¥Ð ¡…©¥­”é‰ÕµÁ•Èµ¡¥Ðœ°ì(€€€€€½Õ¹ÐèÑ¡¥Ì¹±…Õ¹¡	ÕµÁ•É!¥Ñ½Õ¹Ð°(€€€€€Á½¥¹ÑÌ°(€€€€€¥µÁ…ÑMÁ••°(€€€ô¤ì(€€€Ñ¡¥Ì¹Í¡½Ý	ÕÉÍÐ¡‰ÕµÁ•È¹à€¬¹½Éµ…°¹à€¨€ÈÐ°‰ÕµÁ•È¹ä€¬¹½Éµ…°¹ä€¨€ÈÐ°€Áá‰™••™˜°€Ô¤ì(€ô((€ÁÉ¥Ù…Ñ”…ÁÁ±åM¡½­Ý…Ù”¡Í½ÕÉ”è	…±±¹Ñ¥Ñä¤èÙ½¥ì(€€€½¹ÍÐµÕ±Ñ¥Á±¥•È€ô5}=9%¹µ•É•M¡½­Ý…Ù”¹±•Ù•±5Õ±Ñ¥Á±¥•ÉÍmÍ½ÕÉ”¹±•Ù•±t€üü€Äì(€€€½¹ÍÐµÕ±Ñ¥Á±¥•ÉAÉ½É•ÍÌ€ô5…Ñ ¹µ¥¸¡5…Ñ ¹µ…à ¡µÕ±Ñ¥Á±¥•È€´€Ä¤€¼€Ì°€À¤°€Ä¤ì(€€€½¹ÍÐ¥µÁÕ±Í”€ô5}=9%¹µ•É•M¡½­Ý…Ù”¹µ¥¹%µÁÕ±Í”(€€€€€€¬€¡5}=9%¹µ•É•M¡½­Ý…Ù”¹µ…á%µÁÕ±Í”€´5}=9%¹µ•É•M¡½­Ý…Ù”¹µ¥¹%µÁÕ±Í”¤(€€€€€€€€¨µÕ±Ñ¥Á±¥•ÉAÉ½É•ÍÌ€¨¨€Ä¸ÈÔì(€€€½¹ÍÐÉ…‘¥ÕÌ€ô5}=9%¹µ•É•M¡½­Ý…Ù”¹µ¥¹I…‘¥ÕÌ(€€€€€€¬€¡5}=9%¹µ•É•M¡½­Ý…Ù”¹µ…áI…‘¥ÕÌ€´5}=9%¹µ•É•M¡½­Ý…Ù”¹µ¥¹I…‘¥ÕÌ¤(€€€€€€€€¨µÕ±Ñ¥Á±¥•ÉAÉ½É•ÍÌ€¨¨€À¸àÔì((€€€™½È€¡½¹ÍÐ‰…±°½˜Ñ¡¥Ì¹‰…±±Ì¹Ù…±Õ•Ì ¤¤ì(€€€€€¥˜€¡‰…±°¹¥€ôôôÍ½ÕÉ”¹¥ñð‰…±°¹¥Í%¹1…Õ¹¡1…¹”ñð‰…±°¹¥Í5•É¥¹œ¤½¹Ñ¥¹Õ”ì(€€€€€½¹ÍÐ‘à€ô‰…±°¹‰½‘ä¹Á½Í¥Ñ¥½¸¹à€´Í½ÕÉ”¹‰½‘ä¹Á½Í¥Ñ¥½¸¹àì(€€€€€½¹ÍÐ‘ä€ô‰…±°¹‰½‘ä¹Á½Í¥Ñ¥½¸¹ä€´Í½ÕÉ”¹‰½‘ä¹Á½Í¥Ñ¥½¸¹äì(€€€€€½¹ÍÐ‘¥ÍÑ…¹”€ô5…Ñ ¹¡åÁ½Ð¡‘à°‘ä¤ì(€€€€€¥˜€¡‘¥ÍÑ…¹”€øÉ…‘¥ÕÌñð‘¥ÍÑ…¹”€ð€Ä¤½¹Ñ¥¹Õ”ì(€€€€€½¹ÍÐ™…±±½™˜€ô€ Ä€´‘¥ÍÑ…¹”€¼É…‘¥ÕÌ¤€¨¨5}=9%¹µ•É•M¡½­Ý…Ù”¹™…±±½™™áÁ½¹•¹Ðì(€€€€€½¹ÍÐÍ…±”€ô¥µÁÕ±Í”€¨™…±±½™˜ì(€€€€€Ñ¡¥Ì¹Í•Ñ	½‘åY•±½¥Ñä¡‰…±°¹‰½‘ä°ì(€€€€€€€àè‰…±°¹‰½‘ä¹Ù•±½¥Ñä¹à€¬€¡‘à€¼‘¥ÍÑ…¹”¤€¨Í…±”°(€€€€€€€äè‰…±°¹‰½‘ä¹Ù•±½¥Ñä¹ä€¬€¡‘ä€¼‘¥ÍÑ…¹”¤€¨Í…±”°(€€€€€ô¤ì(€€€€€Ñ¡¥Ì¹…Á	½‘åMÁ••¡‰…±°¹‰½‘ä¤ì(€€€ô(€ô((€ÁÉ¥Ù…Ñ”É•½Ù•É¥•±‘	½‘¥•Ì ¤èÙ½¥ì(€€€™½È€¡½¹ÍÐ‰…±°½˜Ñ¡¥Ì¹‰…±±Ì¹Ù…±Õ•Ì ¤¤ì(€€€€€¥˜€¡‰…±°¹¥Í%¹1…Õ¹¡1…¹”¤½¹Ñ¥¹Õ”ì(€€€€€½¹ÍÐÉ…‘¥ÕÌ€ôÉ…‘¥ÕÍ½É1•Ù•°¡‰…±°¹±•Ù•°¤ì(€€€€€½¹ÍÐ‰½‘ä€ô‰…±°¹‰½‘äì(€€€€€½¹ÍÐÁ½Í¥Ñ¥½¹%Í¥¹¥Ñ”€ô9Õµ‰•È¹¥Í¥¹¥Ñ”¡‰½‘ä¹Á½Í¥Ñ¥½¸¹à¤€˜˜9Õµ‰•È¹¥Í¥¹¥Ñ”¡‰½‘ä¹Á½Í¥Ñ¥½¸¹ä¤ì(€€€€€½¹ÍÐÙ•±½¥Ñå%Í¥¹¥Ñ”€ô9Õµ‰•È¹¥Í¥¹¥Ñ”¡‰½‘ä¹Ù•±½¥Ñä¹à¤€˜˜9Õµ‰•È¹¥Í¥¹¥Ñ”¡‰½‘ä¹Ù•±½¥Ñä¹ä¤ì((€€€€€¥˜€ …Á½Í¥Ñ¥½¹%Í¥¹¥Ñ”ñð€…Ù•±½¥Ñå%Í¥¹¥Ñ”¤ì(€€€€€€€Ñ¡¥Ì¹Í•Ñ	½‘åA½Í¥Ñ¥½¸¡‰½‘ä°ì(€€€€€€€€€àè€¡]=I1¹™¥•±¹±•™Ð€¬]=I1¹™¥•±¹É¥¡Ð¤€¼€È°(€€€€€€€€€äè]=I1¹™¥•±¹Ñ½À€¬É…‘¥ÕÌ€¬€ÐÀ°(€€€€€€€ô¤ì(€€€€€€€Ñ¡¥Ì¹Í•Ñ	½‘åY•±½¥Ñä¡‰½‘ä°ìàè€À°äè€Àô¤ì(€€€€€€€Ñ¡¥Ì¹Í•Ñ	½‘å¹Õ±…ÉY•±½¥Ñä¡‰½‘ä°€À¤ì(€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€ô((€€€€€½¹ÍÐ½¹Ñ…¥¹•€ô½¹Ñ…¥¹¥É±•%¹	½Õ¹‘Ì (€€€€€€€‰½‘ä¹Á½Í¥Ñ¥½¸°(€€€€€€€É…‘¥ÕÌ°(€€€€€€€]=I1¹™¥•±°(€€€€€€€5}=9%¹™¥•±‘	½Õ¹‘…Éä¹½¹Ñ…¥¹µ•¹ÑA…‘‘¥¹œ°(€€€€€€¤ì(€€€€€¥˜€ …½¹Ñ…¥¹•¹¡¥Ñ1•™Ð€˜˜€…½¹Ñ…¥¹•¹¡¥ÑI¥¡Ð€˜˜€…½¹Ñ…¥¹•¹¡¥ÑQ½À€˜˜€…½¹Ñ…¥¹•¹¡¥Ñ	½ÑÑ½´¤ì(€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€ô((€€€€€Ñ¡¥Ì¹Í•Ñ	½‘åA½Í¥Ñ¥½¸¡‰½‘ä°½¹Ñ…¥¹•¹Á½Í¥Ñ¥½¸¤ì(€€€€€½¹ÍÐÉ•ÍÑ¥ÑÕÑ¥½¸€ô5}=9%¹™¥•±‘	½Õ¹‘…Éä¹É•½Ù•ÉåI•ÍÑ¥ÑÕÑ¥½¸ì(€€€€€±•ÐÙ•±½¥Ñå`€ô‰½‘ä¹Ù•±½¥Ñä¹àì(€€€€€±•ÐÙ•±½¥Ñåd€ô‰½‘ä¹Ù•±½¥Ñä¹äì(€€€€€¥˜€¡½¹Ñ…¥¹•¹¡¥Ñ1•™Ð€˜˜Ù•±½¥Ñå`€ð€À¤Ù•±½¥Ñå`€ô5…Ñ ¹…‰Ì¡Ù•±½¥Ñå`¤€¨É•ÍÑ¥ÑÕÑ¥½¸ì(€€€€€¥˜€¡½¹Ñ…¥¹•¹¡¥ÑI¥¡Ð€˜˜Ù•±½¥Ñå`€ø€À¤Ù•±½¥Ñå`€ô€µ5…Ñ ¹…‰Ì¡Ù•±½¥Ñå`¤€¨É•ÍÑ¥ÑÕÑ¥½¸ì(€€€€€¥˜€¡½¹Ñ…¥¹•¹¡¥ÑQ½À€˜˜Ù•±½¥Ñåd€ð€À¤Ù•±½¥Ñåd€ô5…Ñ ¹…‰Ì¡Ù•±½¥Ñåd¤€¨É•ÍÑ¥ÑÕÑ¥½¸ì(€€€€€¥˜€¡½¹Ñ…¥¹•¹¡¥Ñ	½ÑÑ½´€˜˜Ù•±½¥Ñåd€ø€À¤Ù•±½¥Ñåd€ô€µ5…Ñ ¹…‰Ì¡Ù•±½¥Ñåd¤€¨É•ÍÑ¥ÑÕÑ¥½¸ì(€€€€€Ñ¡¥Ì¹Í•Ñ	½‘åY•±½¥Ñä¡‰½‘ä°±¥µ¥ÑY•Ñ½È (€€€€€€€ìàèÙ•±½¥Ñå`°äèÙ•±½¥Ñådô°(€€€€€€€5}=9%¹µ…á	½‘åMÁ••°(€€€€€€¤¤ì(€€€€€Ñ¡¥Ì¹Í•Ñ	½‘å¹Õ±…ÉY•±½¥Ñä¡‰½‘ä°‰½‘ä¹…¹Õ±…ÉY•±½¥Ñä€¨€À¸ØÔ¤ì(€€€ô(€ô((€ÁÉ¥Ù…Ñ”…Á±±	½‘åMÁ••‘Ì ¤èÙ½¥ì(€€€™½È€¡½¹ÍÐ‰…±°½˜Ñ¡¥Ì¹‰…±±Ì¹Ù…±Õ•Ì ¤¤Ñ¡¥Ì¹…Á	½‘åMÁ••¡‰…±°¹‰½‘ä¤ì(€ô((€ÁÉ¥Ù…Ñ”…Á	½‘åMÁ••¡‰½‘äè5…ÑÑ•É)L¹	½‘åQåÁ”¤èÙ½¥ì(€€€½¹ÍÐ±¥µ¥Ñ•€ô±¥µ¥ÑY•Ñ½È¡‰½‘ä¹Ù•±½¥Ñä°5}=9%¹µ…á	½‘åMÁ••¤ì(€€€¥˜€¡±¥µ¥Ñ•¹à€ôôô‰½‘ä¹Ù•±½¥Ñä¹à€˜˜±¥µ¥Ñ•¹ä€ôôô‰½‘ä¹Ù•±½¥Ñä¹ä¤É•ÑÕÉ¸ì(€€€Ñ¡¥Ì¹Í•Ñ	½‘åY•±½¥Ñä¡‰½‘ä°±¥µ¥Ñ•¤ì(€ô((€ÁÉ¥Ù…Ñ”Í•Ñ	½‘åY•±½¥Ñä¡‰½‘äè5…ÑÑ•É)L¹	½‘åQåÁ”°Ù•±½¥ÑäèY•Ñ½É1¥­”¤èÙ½¥ì(€€€Ñ¡¥Ì¹µ…ÑÑ•È¹‰½‘ä¹Í•ÑY•±½¥Ñä¡‰½‘ä°Ù•±½¥Ñä¤ì(€ô((€ÁÉ¥Ù…Ñ”Í•Ñ	½‘åA½Í¥Ñ¥½¸¡‰½‘äè5…ÑÑ•É)L¹	½‘åQåÁ”°Á½Í¥Ñ¥½¸èY•Ñ½É1¥­”¤èÙ½¥ì(€€€Ñ¡¥Ì¹µ…ÑÑ•È¹‰½‘ä¹Í•ÑA½Í¥Ñ¥½¸¡‰½‘ä°Á½Í¥Ñ¥½¸¤ì(€ô((€ÁÉ¥Ù…Ñ”Í•Ñ	½‘å¹Õ±…ÉY•±½¥Ñä¡‰½‘äè5…ÑÑ•É)L¹	½‘åQåÁ”°Ù•±½¥Ñäè¹Õµ‰•È¤èÙ½¥ì(€€€Ñ¡¥Ì¹µ…ÑÑ•È¹‰½‘ä¹Í•Ñ¹Õ±…ÉY•±½¥Ñä¡‰½‘ä°Ù•±½¥Ñä¤ì(€ô((€ÁÉ¥Ù…Ñ”‘É…Ý	½…É ¤èÙ½¥ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±•…È ¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹™¥±±MÑå±” ÁàÀàÈÌÑ„°€Ä¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹™¥±±I½Õ¹‘•‘I•Ð ÔÔ°€ØÀ°€ØÄÀ°€ÄÄÌÀ°€ÌÈ¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•MÑå±” Ø°€ÁàÑ„Ý…„°€À¸ÐÔ¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹ÍÑÉ½­•I½Õ¹‘•‘I•Ð ÔÔ°€ØÀ°€ØÄÀ°€ÄÄÌÀ°€ÌÈ¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹™¥±±MÑå±” ÁàÄÌÉ˜Õˆ°€Ä¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹™¥±±I½Õ¹‘•‘I•Ð¡]=I1¹™¥•±¹±•™Ð°]=I1¹™¥•±¹Ñ½À€¬€ÄÈ°]=I1¹™¥•±¹É¥¡Ð€´]=I1¹™¥•±¹±•™Ð°]=I1¹™¥•±¹‰½ÑÑ½´€´]=I1¹™¥•±¹Ñ½À€´€ÄÈ°€ÄØ¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•MÑå±” Ð°€ÁàÕäÉŒÄ°€À¸Ü¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹ÍÑÉ½­•I½Õ¹‘•‘I•Ð¡]=I1¹™¥•±¹±•™Ð°]=I1¹™¥•±¹Ñ½À€¬€ÄÈ°]=I1¹™¥•±¹É¥¡Ð€´]=I1¹™¥•±¹±•™Ð°]=I1¹™¥•±¹‰½ÑÑ½´€´]=I1¹™¥•±¹Ñ½À€´€ÄÈ°€ÄØ¤ì(€€€½¹ÍÐ±…¹•A…Ñ €ô5}=9%¹±…Õ¹¡1…¹”¹Á…Ñ ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•MÑå±”¡5}=9%¹±…Õ¹¡1…¹”¹½ÉÉ¥‘½É]¥‘Ñ °€ÁàÄØÍ˜ÜÀ°€Ä¤ì(€€€™½È€¡±•Ð¥¹‘•à€ô€Àì¥¹‘•à€ð±…¹•A…Ñ ¹±•¹Ñ €´€Äì¥¹‘•à€¬ô€Ä¤ì(€€€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•	•ÑÝ••¸ (€€€€€€€±…¹•A…Ñ¡m¥¹‘•át¹à°(€€€€€€€±…¹•A…Ñ¡m¥¹‘•át¹ä°(€€€€€€€±…¹•A…Ñ¡m¥¹‘•à€¬€Åt¹à°(€€€€€€€±…¹•A…Ñ¡m¥¹‘•à€¬€Åt¹ä°(€€€€€€¤ì(€€€ô(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•MÑå±” Ð°€ÁàØÝˆå•Œ°€À¸à¤ì(€€€™½È€¡±•Ð¥¹‘•à€ô€Àì¥¹‘•à€ð±…¹•A…Ñ ¹±•¹Ñ €´€Äì¥¹‘•à€¬ô€Ä¤ì(€€€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•	•ÑÝ••¸ (€€€€€€€±…¹•A…Ñ¡m¥¹‘•át¹à°(€€€€€€€±…¹•A…Ñ¡m¥¹‘•át¹ä°(€€€€€€€±…¹•A…Ñ¡m¥¹‘•à€¬€Åt¹à°(€€€€€€€±…¹•A…Ñ¡m¥¹‘•à€¬€Åt¹ä°(€€€€€€¤ì(€€€ô(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹™¥±±MÑå±” Áá„Í‘™™˜°€À¸ØÔ¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹™¥±±¥É±” (€€€€€5}=9%¹±…Õ¹¡1…¹”¹•á¥ÑA½Í¥Ñ¥½¸¹à°(€€€€€5}=9%¹±…Õ¹¡1…¹”¹•á¥ÑA½Í¥Ñ¥½¸¹ä°(€€€€€€Ü°(€€€€¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•MÑå±” È°€Áá™˜ÕˆØÀ°€À¸Èà¤ì(€€€Ñ¡¥Ì¹‰½…É‘É…Á¡¥Ì¹±¥¹•	•ÑÝ••¸¡]=I1¹™¥•±¹±•™Ð€¬€à°]=I1¹‘…¹•É1¥¹•d°]=I1¹™¥•±¹É¥¡Ð€´€à°]=I1¹‘…¹•É1¥¹•d¤ì(€ô((€ÁÉ¥Ù…Ñ”É•¹‘•É]½É± ¤èÙ½¥ì(€€€½¹ÍÐ¹½Ü€ôÑ¡¥Ì¹Ñ¥µ”¹¹½Üì(€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹±•…È ¤ì(€€€Ñ¡¥Ì¹™áÉ…Á¡¥Ì¹±•…È ¤ì((€€€™½È€¡½¹ÍÐ‰ÕµÁ•È½˜Ñ¡¥Ì¹‰ÕµÁ•ÉÌ¹Ù…±Õ•Ì ¤¤ì(€€€€€½¹ÍÐÁÕ±Í”€ô‰ÕµÁ•È¹ÁÕ±Í•U¹Ñ¥°€ø¹½Ü€ü€Ä€¬€ ¡‰ÕµÁ•È¹ÁÕ±Í•U¹Ñ¥°€´¹½Ü¤€¼€ÄàÀ¤€¨€À¸È€è€Äì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±MÑå±” ÁàÑ…„Ý‘°€Ä¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±¥É±”¡‰ÕµÁ•È¹à°‰ÕµÁ•È¹ä°5}=9%¹‰ÕµÁ•È¹É…‘¥ÕÌ€¨ÁÕ±Í”¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹±¥¹•MÑå±” Ô°€Áàá™‘™˜°€À¸äÔ¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹ÍÑÉ½­•¥É±”¡‰ÕµÁ•È¹à°‰ÕµÁ•È¹ä°5}=9%¹‰ÕµÁ•È¹É…‘¥ÕÌ€¨ÁÕ±Í”¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±MÑå±” Áá”á™‰™˜°€À¸ä¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±¥É±”¡‰ÕµÁ•È¹à€´€ÄÀ°‰ÕµÁ•È¹ä€´€ÄÀ°€ä€¨ÁÕ±Í”¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±MÑå±” ÁàÅˆÕäÄ°€À¸äÔ¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±¥É±”¡‰ÕµÁ•È¹à€¬€Ð°‰ÕµÁ•È¹ä€¬€Ô°€Ø€¨ÁÕ±Í”¤ì(€€€ô((€€€™½È€¡½¹ÍÐ‰…±°½˜Ñ¡¥Ì¹‰…±±Ì¹Ù…±Õ•Ì ¤¤ì(€€€€€½¹ÍÐÁ½Í¥Ñ¥½¸€ô‰…±°¹‰½‘ä¹Á½Í¥Ñ¥½¸ì(€€€€€½¹ÍÐÉ…‘¥ÕÌ€ôÉ…‘¥ÕÍ½É1•Ù•°¡‰…±°¹±•Ù•°¤ì(€€€€€½¹ÍÐ½±½È€ô	11}=1=IMm‰…±°¹±•Ù•±t€üü	11}=1=IMlÅtì(€€€€€½¹ÍÐ…±Á¡„€ô‰…±°¹¥Í%¹1…Õ¹¡1…¹”€ü€À¸äÈ€è€Äì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±MÑå±”¡½±½È°…±Á¡„¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±¥É±”¡Á½Í¥Ñ¥½¸¹à°Á½Í¥Ñ¥½¸¹ä°É…‘¥ÕÌ¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹±¥¹•MÑå±” Ì°€ÁàÀÜÅŒÌä°€À¸Øà¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹ÍÑÉ½­•¥É±”¡Á½Í¥Ñ¥½¸¹à°Á½Í¥Ñ¥½¸¹ä°É…‘¥ÕÌ¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±MÑå±” Áá™™™™™˜°€À¸È¤ì(€€€€€Ñ¡¥Ì¹‰…±±É…Á¡¥Ì¹™¥±±¥É±”¡Á½Í¥Ñ¥½¸¹à€´É…‘¥ÕÌ€¨€À¸ÌÈ°Á½Í¥Ñ¥½¸¹ä€´É…‘¥ÕÌ€¨€À¸ÌÐ°É…‘¥ÕÌ€¨€À¸È¤ì(€€€€€‰…±°¹±…‰•°¹Í•ÑA½Í¥Ñ¥½¸¡Á½Í¥Ñ¥½¸¹à°Á½Í¥Ñ¥½¸¹ä¤ì(€€€ô(€ô((€ÁÉ¥Ù…Ñ”Í¡½Ý	ÕÉÍÐ¡àè¹Õµ‰•È°äè¹Õµ‰•È°½±½Èè¹Õµ‰•È°Á…ÉÑ¥±•½Õ¹Ð€ô€à¤èÙ½¥ì(€€€½¹ÍÐÉ¥¹œ€ôÑ¡¥Ì¹…‘¹¥É±”¡à°ä°€ÄÈ°½±½È°€À¸Äà¤¹Í•ÑMÑÉ½­•MÑå±” Ð°½±½È°€À¸ä¤¹Í•Ñ•ÁÑ  Ð¤ì(€€€Ñ¡¥Ì¹ÑÝ••¹Ì¹…‘¡ì(€€€€€Ñ…É•ÑÌèÉ¥¹œ°(€€€€€Í…±”è€Ð°(€€€€€…±Á¡„è€À°(€€€€€‘ÕÉ…Ñ¥½¸è€ÌÐÀ°(€€€€€•…Í”è€Õ‰¥Œ¹=ÕÐœ°(€€€€€½¹½µÁ±•Ñ”è€ ¤€ôøÉ¥¹œ¹‘•ÍÑÉ½ä ¤°(€€€ô¤ì((€€€™½È€¡±•Ð¥¹‘•à€ô€Àì¥¹‘•à€ðÁ…ÉÑ¥±•½Õ¹Ðì¥¹‘•à€¬ô€Ä¤ì(€€€€€½¹ÍÐ…¹±”€ô€¡5…Ñ ¹A$€¨€È€¨¥¹‘•à¤€¼Á…ÉÑ¥±•½Õ¹Ðì(€€€€€½¹ÍÐ‘¥ÍÑ…¹”€ô€ÈÈ€¬€¡¥¹‘•à€”€Ì¤€¨€äì(€€€€€½¹ÍÐÁ…ÉÑ¥±”€ôÑ¡¥Ì¹…‘¹¥É±”¡à°ä°€Ð°½±½È°€À¸ä¤¹Í•Ñ•ÁÑ  Ð¤ì(€€€€€Ñ¡¥Ì¹ÑÝ••¹Ì¹…‘¡ì(€€€€€€€Ñ…É•ÑÌèÁ…ÉÑ¥±”°(€€€€€€€àèà€¬5…Ñ ¹½Ì¡…¹±”¤€¨‘¥ÍÑ…¹”°(€€€€€€€äèä€¬5…Ñ ¹Í¥¸¡…¹±”¤€¨‘¥ÍÑ…¹”°(€€€€€€€Í…±”è€À¸È°(€€€€€€€…±Á¡„è€À°(€€€€€€€‘ÕÉ…Ñ¥½¸è€ÌàÀ°(€€€€€€€•…Í”è€Õ‰¥Œ¹=ÕÐœ°(€€€€€€€½¹½µÁ±•Ñ”è€ ¤€ôøÁ…ÉÑ¥±”¹‘•ÍÑÉ½ä ¤°(€€€€€ô¤ì(€€€ô(€ô((€ÁÉ¥Ù…Ñ”½¹Ñ…Ñ-•ä¡™¥ÉÍÑ%è¹Õµ‰•È°Í•½¹‘%è¹Õµ‰•È¤èÍÑÉ¥¹œì(€€€É•ÑÕÉ¸™¥ÉÍÑ%€ðÍ•½¹‘%€ü€‘í™¥ÉÍÑ%‘ôè‘íÍ•½¹‘%‘õ€€è€‘íÍ•½¹‘%‘ôè‘í™¥ÉÍÑ%‘õ€ì(€ô((€ÁÉ¥Ù…Ñ”•µ¥Ð¡¹…µ”èÍÑÉ¥¹œ°‘•Ñ…¥°èÕ¹­¹½Ý¸¤èÙ½¥ì(€€€Ý¥¹‘½Ü¹‘¥ÍÁ…Ñ¡Ù•¹Ð¡¹•ÜÕÍÑ½µÙ•¹Ð¡¹…µ”°ì‘•Ñ…¥°ô¤¤ì(€ô((€ÁÉ¥Ù…Ñ”¡…¹‘±•M¡ÕÑ‘½Ý¸ ¤èÙ½¥ì(€€€Ý¥¹‘½Ü¹É•µ½Ù•Ù•¹Ñ1¥ÍÑ•¹•È ¡…©¥­”é…Ñ¥½¸œ°Ñ¡¥Ì¹…Ñ¥½¹!…¹‘±•È¤ì(€€€Ý¥¹‘½Ü¹É•µ½Ù•Ù•¹Ñ1¥ÍÑ•¹•È ¡…©¥­”é¡…É”µÍÑ…ÉÐœ°Ñ¡¥Ì¹¡…É•MÑ…ÉÑ!…¹‘±•È¤ì(€€€Ý¥¹‘½Ü¹É•µ½Ù•Ù•¹Ñ1¥ÍÑ•¹•È ¡…©¥­”é¡…É”µ•¹œ°Ñ¡¥Ì¹¡…É•¹‘!…¹‘±•È¤ì(€€€Ý¥¹‘½Ü¹É•µ½Ù•Ù•¹Ñ1¥ÍÑ•¹•È ¡…©¥­”é¡…É”µ…¹•°œ°Ñ¡¥Ì¹¡…É•…¹•±!…¹‘±•È¤ì(€€€Ñ¡¥Ì¹µ…ÑÑ•È¹Ý½É±¹½™˜ ½±±¥Í¥½¹ÍÑ…ÉÐœ°Ñ¡¥Ì¹½±±¥Í¥½¹MÑ…ÉÑ!…¹‘±•È¤ì(€€€Ñ¡¥Ì¹µ…ÑÑ•È¹Ý½É±¹½™˜ ½±±¥Í¥½¹•¹œ°Ñ¡¥Ì¹½±±¥Í¥½¹¹‘!…¹‘±•È¤ì(€€€Ñ¡¥Ì¹½¹Ñ…ÑMÑ…ÉÑÌ¹±•…È ¤ì(€€€Ñ¡¥Ì¹‰ÕµÁ•É!¥Ñ½½±‘½Ý¹Ì¹±•…È ¤ì(€€€Ñ¡¥Ì¹‰…±±Ì¹±•…È ¤ì(€€€Ñ¡¥Ì¹‰…±±Í	å	½‘å%¹±•…È ¤ì(€€€Ñ¡¥Ì¹‰ÕµÁ•ÉÌ¹±•…È ¤ì(€€€Ñ¡¥Ì¹±…Õ¹¡	ÕµÁ•É!¥Ñ½Õ¹Ð€ô€Àì(€€€Ñ¡¥Ì¹±…ÍÑ1…Õ¹¡	ÕµÁ•É%€ô¹Õ±°ì(€€€Ñ¡¥Ì¹ÍÑ…Ñ¥	½‘¥•Ì¹±•¹Ñ €ô€Àì(€ô)ô(

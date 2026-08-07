@@ -44,6 +44,7 @@ let isOverlayGameOver = false;
 let comboToastTimer: number | undefined;
 let eventToastTimer: number | undefined;
 let isPointerDown = false;
+let activePointerId: number | null = null;
 
 const dispatchAction = (action: GameAction): void => {
   window.dispatchEvent(new CustomEvent<{ action: GameAction }>('hajike:action', { detail: { action } }));
@@ -147,32 +148,40 @@ const beginCharge = (event: PointerEvent): void => {
   if (isPointerDown || launchButton.disabled) return;
   event.preventDefault();
   isPointerDown = true;
+  activePointerId = event.pointerId;
   launchButton.setPointerCapture?.(event.pointerId);
   window.dispatchEvent(new CustomEvent('hajike:charge-start'));
 };
 
 const endCharge = (event: PointerEvent): void => {
-  if (!isPointerDown) return;
+  if (!isPointerDown || event.pointerId !== activePointerId) return;
   event.preventDefault();
   isPointerDown = false;
+  activePointerId = null;
   window.dispatchEvent(new CustomEvent('hajike:charge-end'));
+};
+
+const cancelCharge = (event?: PointerEvent): void => {
+  if (!isPointerDown) return;
+  if (event && activePointerId !== null && event.pointerId !== activePointerId) return;
+  event?.preventDefault();
+  isPointerDown = false;
+  activePointerId = null;
+  window.dispatchEvent(new CustomEvent('hajike:charge-cancel'));
 };
 
 launchButton.addEventListener('pointerdown', beginCharge);
 launchButton.addEventListener('pointerup', endCharge);
-launchButton.addEventListener('pointercancel', endCharge);
-launchButton.addEventListener('lostpointercapture', () => {
-  if (isPointerDown) {
-    isPointerDown = false;
-    window.dispatchEvent(new CustomEvent('hajike:charge-end'));
-  }
-});
+launchButton.addEventListener('pointercancel', cancelCharge);
+launchButton.addEventListener('lostpointercapture', cancelCharge);
+window.addEventListener('blur', () => cancelCharge());
 
 pauseButton.addEventListener('click', () => dispatchAction('pause-toggle'));
 overlayAction.addEventListener('click', () => dispatchAction(isOverlayGameOver ? 'restart' : 'resume'));
 
 window.addEventListener('hajike:charge-cancelled', () => {
   isPointerDown = false;
+  activePointerId = null;
   updatePower({ ratio: 0 });
 });
 
@@ -198,8 +207,8 @@ const game = new Phaser.Game({
     matter: {
       gravity: { y: GAME_CONFIG.gravityY, x: 0 },
       enableSleeping: true,
-      positionIterations: 8,
-      velocityIterations: 6,
+      positionIterations: 12,
+      velocityIterations: 8,
       constraintIterations: 2,
       debug: false,
     },

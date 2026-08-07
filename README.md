@@ -47,7 +47,7 @@ npm test
 - 9:16基準の縦画面レイアウト、上部HUD、危険ライン、中央フィールド、右側発射レーン、NEXT 3個、発射ボタン、パワーゲージ
 - ノッチ・ホームインジケーター向けCSS safe-area、横画面時の縦向き案内
 - タッチとマウスに対応した長押し発射（0〜1正規化、最小〜最大速度補間、最大チャージ1.5秒）
-- Matter Physicsによる重力、円形球、壁、床、レーン、反発、摩擦、回転、スリープ、高速移動向けの連続物理設定
+- Matter Physicsによる重力、円形球、壁、床、レーン、反発、摩擦、回転、スリープ、速度上限・境界復帰
 - レベル1〜8の色・サイズ・質量差、中央番号表示
 - `[1, 1, 1, 1, 1, 2, 2, 3]` のシャッフルバッグとNEXTキュー
 - 固定バンパー3個、追加反射、拡縮、発光・簡易パーティクル
@@ -63,7 +63,7 @@ npm test
 
 ## 物理パラメータの調整場所
 
-ゲームバランスと物理値は [src/config/gameConfig.ts](src/config/gameConfig.ts) に集約しています。主な調整対象は `gravityY`、`minLaunchSpeed` / `maxLaunchSpeed`、`maxBodySpeed`、`launchLane`、`ball`、`wall`、`floor`、`bumper`、`merge.contactTimeMs`、`mergeShockwave`、`comboWindowMs`、`dangerGraceMs` です。`launchLane.path` がカーブ形状、`exitPosition` / `exitAngleRadians` が出口、`bumper.baseScore` / `strongHitSpeed` / `scoreCooldownMs` がバンパー得点、`mergeShockwave.levelMultipliers` がLv2〜8の衝撃倍率です。
+ゲームバランスと物理値は [src/config/gameConfig.ts](src/config/gameConfig.ts) に集約しています。主な調整対象は `gravityY`、`minLaunchSpeed` / `maxLaunchSpeed`、`maxBodySpeed`、`fieldBoundary`、`launchLane`、`ball`、`wall`、`floor`、`bumper`、`merge.contactTimeMs`、`mergeShockwave`、`comboWindowMs`、`dangerGraceMs` です。`launchLane.path` がカーブ形状、`laneTravelSpeed` / `lookAheadDistance` / `steeringStrength` がレーン内の進行補助、`exitPosition` / `exitAngleRadians` が出口、`fieldBoundary` が壁厚と境界復帰、`bumper.baseScore` / `strongHitSpeed` / `scoreCooldownMs` がバンパー得点、`mergeShockwave.levelMultipliers` がLv2〜8の衝撃倍率です。
 
 発射レーンの進入判定とワールド座標は同ファイルの `WORLD`、球の生成・演出・Matterイベント接続は [src/scenes/HajikeScene.ts](src/scenes/HajikeScene.ts) にあります。描画を簡易Graphicsにしているため、将来は `renderWorld` の球描画を画像アセットへ置き換えられます。
 
@@ -71,7 +71,7 @@ npm test
 
 1. `npm run dev` で起動し、ブラウザの開発者コンソールに重大なエラーがないことを確認する。
 2. 短押し・約0.75秒・1.5秒以上の長押しを行い、パワーゲージと球の発射速度／到達位置が変わることを確認する。
-3. 発射球が右側レーンを上昇し、レーン上部からフィールドへ入ることを確認する。連打している間は発射ボタンが無効になる。
+3. 発射球が右側レーンを上昇し、カーブで停止せずレーン上部からフィールドへ入ることを確認する。球がレーン内にある間は次の発射が無効になる。
 4. 球が左右の壁・床・3個のバンパーで反射し、バンパー接触時に拡縮と発光が出ることを確認する。
 5. 同じレベルの球を接触させ、約0.1秒後に1段階上の球、スコア、マージ演出が生成されることを確認する。異なるレベルはマージしない。
 6. 短時間に続けてマージし、`COMBO 2` 以降と倍率が表示されることを確認する。
@@ -90,8 +90,12 @@ npm test
 
 ## 今回の物理改良メモ
 
-- 発射レーンは `launchLane.path` の各点から左右へオフセットした複数の静的Matter壁と丸い接続部を生成しています。発射口には、レーン中の球とは衝突せず、フィールド側の球だけを止める `laneGate` を置いて逆流を防いでいます。
-- 発射速度は長押し時間を0〜1.5秒で正規化し、`minLaunchSpeed`〜`maxLaunchSpeed`を線形補間します。出口では同じ速度を出口角へ向け直すため、弱・中・強でフィールド内の到達位置が変わります。
+- 発射レーンは最大Lv3の直径に対して余裕が残る96px幅とし、`launchLane.path` の各点から左右へオフセットした静的Matter壁と丸い接続部を生成しています。折れ点の壁法線は前後セグメントの平均から求め、内側へ尖った継ぎ目を減らしています。
+- レーン内の球はMatterの動的ボディのまま、中心線上の少し先を追う速度補助を受けます。中心から外れた場合や0.42秒進まない場合だけ安全な経路上へ復帰するため、弱いチャージでも出口で停止し続けません。
+- 出口の `laneGate` は物理的に跳ね返す壁ではなくセンサーです。出口通過時に球の衝突カテゴリをレーン用からフィールド用へ切り替え、フィールド右端の連続した静的壁によって逆流を防ぎます。
+- 発射速度は長押し時間を0〜1.5秒で正規化し、Matterで壁をすり抜けにくい9〜22の範囲を線形補間します。レーン内の移動速度とは分離し、出口後の初速へチャージ値をそのまま反映するため、弱・中・強でフィールド内の到達位置が変わります。
+- 全フィールド球は速度28を上限とし、28px厚の静的壁を越えた場合にも次の更新で円全体がフィールド内へ戻る境界復帰を行います。バンパーと衝撃波の加速値もこの上限に合わせて調整しています。
+- 長押し中は発射ボタンを無効化しません。押下中にDOMのbuttonを無効化すると一部のモバイルブラウザで`pointerup`が失われるためで、二重入力はゲーム状態とpointer IDで防止します。`pointercancel`、フォーカス喪失、ポーズは発射せずチャージをキャンセルします。
 - バンパー得点はマージ得点と分離し、タマID・バンパーIDごとに0.3秒のクールダウンを持ちます。基本5点、速度閾値以上は追加5点で、コンボ倍率は適用しません。
 - マージ時の放射衝撃は生成後レベルの倍率（Lv2 1.0、Lv3 1.2、Lv4 1.5、Lv5 1.9、Lv6 2.4、Lv7 3.0、Lv8 4.0）から強さと半径を非線形に算出し、`maxBodySpeed`で速度を制限します。マージ直後は`merge.postMergeDangerGraceMs`の間、危険ライン判定を開始しません。
 

@@ -9,11 +9,15 @@ import {
   calculateMergeScore,
   canMerge,
   comboMultiplier,
+  containCircleInBounds,
   nextComboCount,
   dangerDurationReached,
   dangerProgress,
+  limitVector,
   loadBestScore,
   mergedLevel,
+  pointAlongPath,
+  projectPointToPath,
   saveBestScore,
   updateBestScore,
 } from './gameLogic';
@@ -30,6 +34,46 @@ describe('charge and launch speed', () => {
     expect(calculateLaunchSpeed(0, 10, 30, 1_000)).toBe(10);
     expect(calculateLaunchSpeed(500, 10, 30, 1_000)).toBe(20);
     expect(calculateLaunchSpeed(2_000, 10, 30, 1_000)).toBe(30);
+  });
+});
+
+describe('physics safety helpers', () => {
+  const path = [
+    { x: 10, y: 100 },
+    { x: 10, y: 20 },
+    { x: 70, y: 20 },
+  ];
+
+  it('projects a body onto the closest part of the curved lane path', () => {
+    const projection = projectPointToPath({ x: 14, y: 55 }, path);
+    expect(projection.segmentIndex).toBe(0);
+    expect(projection.point).toEqual({ x: 10, y: 55 });
+    expect(projection.distanceToPath).toBeCloseTo(4);
+    expect(projection.distanceAlong).toBeCloseTo(45);
+    expect(projection.totalLength).toBeCloseTo(140);
+  });
+
+  it('returns a look-ahead point across a path corner', () => {
+    const sample = pointAlongPath(path, 100);
+    expect(sample.segmentIndex).toBe(1);
+    expect(sample.point).toEqual({ x: 30, y: 20 });
+    expect(sample.direction).toEqual({ x: 1, y: 0 });
+  });
+
+  it('limits velocity and contains a circle inside the physical field', () => {
+    expect(limitVector({ x: 30, y: 40 }, 25)).toEqual({ x: 15, y: 20 });
+    expect(containCircleInBounds(
+      { x: -20, y: 150 },
+      10,
+      { left: 0, right: 100, top: 0, bottom: 100 },
+      2,
+    )).toEqual({
+      position: { x: 12, y: 88 },
+      hitLeft: true,
+      hitRight: false,
+      hitTop: false,
+      hitBottom: true,
+    });
   });
 });
 
@@ -75,8 +119,8 @@ describe('merge and score rules', () => {
 
 describe('bumper score rules', () => {
   it('adds the strong-hit bonus without involving combo multipliers', () => {
-    expect(calculateBumperHitScore(17)).toBe(5);
-    expect(calculateBumperHitScore(18)).toBe(10);
+    expect(calculateBumperHitScore(13)).toBe(5);
+    expect(calculateBumperHitScore(14)).toBe(10);
   });
 });
 
@@ -108,4 +152,3 @@ describe('best score persistence', () => {
     expect(loadBestScore(storage)).toBe(900);
   });
 });
-

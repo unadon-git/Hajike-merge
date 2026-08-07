@@ -7,6 +7,36 @@ export interface ScoreStorage {
   setItem(key: string, value: string): void;
 }
 
+export interface Vector2Like {
+  x: number;
+  y: number;
+}
+
+export interface BoundsLike {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+export interface PathProjection {
+  point: Vector2Like;
+  direction: Vector2Like;
+  segmentIndex: number;
+  distanceAlong: number;
+  totalLength: number;
+  distanceToPath: number;
+  progress: number;
+}
+
+export interface ContainedCircle {
+  position: Vector2Like;
+  hitLeft: boolean;
+  hitRight: boolean;
+  hitTop: boolean;
+  hitBottom: boolean;
+}
+
 export const BEST_SCORE_KEY = 'hajike-merge.best-score';
 
 export function clamp(value: number, min: number, max: number): number {
@@ -15,6 +45,143 @@ export function clamp(value: number, min: number, max: number): number {
 
 export function lerp(start: number, end: number, ratio: number): number {
   return start + (end - start) * ratio;
+}
+
+export function limitVector(vector: Vector2Like, maxMagnitude: number): Vector2Like {
+  const magnitude = Math.hypot(vector.x, vector.y);
+  if (magnitude <= maxMagnitude || magnitude < Number.EPSILON) return { ...vector };
+  const scale = maxMagnitude / magnitude;
+  return { x: vector.x * scale, y: vector.y * scale };
+}
+
+export function projectPointToPath(
+  position: Vector2Like,
+  path: readonly Vector2Like[],
+): PathProjection {
+  if (path.length < 2) {
+    throw new Error('A launch path requires at least two points.');
+  }
+
+  let bestDistanceSquared = Number.POSITIVE_INFINITY;
+  let bestPoint = { ...path[0] };
+  let bestDirection = { x: 0, y: -1 };
+  let bestSegmentIndex = 0;
+  let bestDistanceAlong = 0;
+  let traversed = 0;
+  let totalLength = 0;
+
+  const segmentLengths = path.slice(0, -1).map((point, index) => {
+    const next = path[index + 1];
+    return Math.hypot(next.x - point.x, next.y - point.y);
+  });
+  totalLength = segmentLengths.reduce((sum, length) => sum + length, 0);
+
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const start = path[index];
+    const end = path[index + 1];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.max(segmentLengths[index], Number.EPSILON);
+    const lengthSquared = length * length;
+    const segmentRatio = clamp(
+      ((position.x - start.x) * dx + (position.y - start.y) * dy) / lengthSquared,
+      0,
+      1,
+    );
+    const projected = {
+      x: start.x + dx * segmentRatio,
+      y: start.y + dy * segmentRatio,
+    };
+    const distanceSquared = (position.x - projected.x) ** 2 + (position.y - projected.y) ** 2;
+
+    if (distanceSquared < bestDistanceSquared) {
+      bestDistanceSquared = distanceSquared;
+      bestPoint = projected;
+      bestDirection = { x: dx / length, y: dy / length };
+      bestSegmentIndex = index;
+      bestDistanceAlong = traversed + length * segmentRatio;
+    }
+    traversed += length;
+  }
+
+  return {
+    point: bestPoint,
+    direction: bestDirection,
+    segmentIndex: bestSegmentIndex,
+    distanceAlong: bestDistanceAlong,
+    totalLength,
+    distanceToPath: Math.sqrt(bestDistanceSquared),
+    progress: totalLength > 0 ? bestDistanceAlong / totalLength : 0,
+  };
+}
+
+export function pointAlongPath(
+  path: readonly Vector2Like[],
+  requestedDistance: number,
+): { point: Vector2Like; direction: Vector2Like; segmentIndex: number } {
+  if (path.length < 2) {
+    throw new Error('A launch path requires at least two points.');
+  }
+
+  const lengths = path.slice(0, -1).map((point, index) => {
+    const next = path[index + 1];
+    return Math.hypot(next.x - point.x, next.y - point.y);
+  });
+  const totalLength = lengths.reduce((sum, length) => sum + length, 0);
+  let remaining = clamp(requestedDistance, 0, totalLength);
+
+  for (let index = 0; index < lengths.length; index += 1) {
+    const start = path[index];
+    const end = path[index + 1];
+    const length = Math.max(lengths[index], Number.EPSILON);
+    if (remaining <= length || index === lengths.length - 1) {
+      const ratio = clamp(remaining / length, 0, 1);
+      return {
+        point: {
+          x: lerp(start.x, end.x, ratio),
+          y: lerp(start.y, end.y, ratio),
+        },
+        direction: {
+          x: (end.x - start.x) / length,
+          y: (end.y - start.y) / length,
+        },
+        segmentIndex: index,
+      };
+    }
+    remaining -= length;
+  }
+
+  const finalIndex = path.length - 2;
+  return {
+    point: { ...path[path.length - 1] },
+    direction: {
+      x: (path[finalIndex + 1].x - path[finalIndex].x) / Math.max(lengths[finalIndex], Number.EPSILON),
+      y: (path[finalIndex + 1].y - path[finalIndex].y) / Math.max(lengths[finalIndex], Number.EPSILON),
+    },
+    segmentIndex: finalIndex,
+  };
+}
+
+export function containCircleInBounds(
+  position: Vector2Like,
+  radius: number,
+  bounds: BoundsLike,
+  padding = 0,
+): ContainedCircle {
+  const minX = bounds.left + radius + padding;
+  const maxX = bounds.right - radius - padding;
+  const minY = bounds.top + radius + padding;
+  const maxY = bounds.bottom - radius - padding;
+  return {
+    position: {
+      x: clamp(position.x, minX, maxX),
+      y: clamp(position.y, minY, maxY),
+    },
+    hitLeft: position.x < minX,
+    hitRight: position.x > maxX,
+    hitTop: position.y < minY,
+    hitBottom: position.y > maxY,
+  };
 }
 
 export function calculateChargeRatio(holdTimeMs: number, maxChargeTimeMs: number = GAME_CONFIG.maxChargeTimeMs): number {
