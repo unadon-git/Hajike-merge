@@ -9,16 +9,16 @@
   <rect width="720" height="1280" fill="#f5f7fb"/>
   <rect x="55" y="60" width="610" height="1130" rx="34" fill="#d78b33" stroke="#8d531c" stroke-width="6"/>
   <rect x="55" y="60" width="610" height="125" rx="30" fill="url(#header)"/>
-  <text x="85" y="132" class="white bold big">ハジケマージ！</text>
-  <text x="390" y="100" class="white small">スコア</text><rect x="370" y="110" width="105" height="50" rx="12" fill="#13549b"/><text x="392" y="145" class="white bold mid">1,250</text>
-  <text x="510" y="100" class="white small">ベスト</text><rect x="495" y="110" width="105" height="50" rx="12" fill="#13549b"/><text x="515" y="145" class="white bold mid">5,680</text>
-  <rect x="610" y="92" width="42" height="55" rx="12" fill="#7fc6ff" stroke="#fff" stroke-width="3"/><text x="624" y="129" class="white bold mid">Ⅱ</text>
-  <rect x="55" y="185" width="520" height="52" fill="#f0382e"/><text x="220" y="220" class="white bold mid">⚠ 危険ライン ⚠</text>
+  <text x="85" y="132" class="white bold big">繝上ず繧ｱ繝槭・繧ｸ・・/text>
+  <text x="390" y="100" class="white small">繧ｹ繧ｳ繧｢</text><rect x="370" y="110" width="105" height="50" rx="12" fill="#13549b"/><text x="392" y="145" class="white bold mid">1,250</text>
+  <text x="510" y="100" class="white small">繝吶せ繝・/text><rect x="495" y="110" width="105" height="50" rx="12" fill="#13549b"/><text x="515" y="145" class="white bold mid">5,680</text>
+  <rect x="610" y="92" width="42" height="55" rx="12" fill="#7fc6ff" stroke="#fff" stroke-width="3"/><text x="624" y="129" class="white bold mid">竇｡</text>
+  <rect x="55" y="185" width="520" height="52" fill="#f0382e"/><text x="220" y="220" class="white bold mid">笞 蜊ｱ髯ｺ繝ｩ繧､繝ｳ 笞</text>
   <rect x="70" y="237" width="500" height="755" rx="16" fill="#fff0b8" stroke="#e0b85c" stroke-width="4"/>
   <rect x="580" y="185" width="75" height="807" rx="18" fill="url(#lane)" stroke="#4696d1" stroke-width="4"/>
-  <text x="596" y="275" class="bold small" transform="rotate(90 596 275)">発射レーン</text>
+  <text x="596" y="275" class="bold small" transform="rotate(90 596 275)">逋ｺ蟆・Ξ繝ｼ繝ｳ</text>
   <g fill="#5c9ed9" stroke="#2d6396" stroke-width="5"><circle cx="320" cy="390" r="38"/><circle cx="205" cy="590" r="38"/><circle cx="435" cy="590" r="38"/></g>
-  <g fill="#fff"><text x="303" y="400" class="bold mid">★</text><text x="188" y="600" class="bold mid">★</text><text x="418" y="600" class="bold mid">★</text></g>
+  <g fill="#fff"><text x="303" y="400" class="bold mid">笘・/text><text x="188" y="600" class="bold mid">笘・/text><text x="418" y="600" class="bold mid">笘・/text></g>
   <g stroke="#8c5b25" stroke-width="3">
     <circle cx="165" cy="870" r="45" fill="#72d45c"/><circle cx="250" cy="900" r="58" fill="#42b8f5"/><circle cx="355" cy="920" r="70" fill="#f15c6f"/><circle cx="470" cy="895" r="52" fill="#ffd44d"/>
     <circle cx="205" cy="790" r="42" fill="#a86ee7"/><circle cx="300" cy="815" r="50" fill="#ff9f43"/><circle cx="410" cy="805" r="42" fill="#72d45c"/><circle cx="500" cy="820" r="36" fill="#f278b6"/>
@@ -30,8 +30,8 @@
   <rect x="78" y="1025" width="285" height="138" rx="18" fill="#fff" stroke="#1e6eb8" stroke-width="5"/><text x="175" y="1057" class="bold mid">NEXT</text>
   <circle cx="145" cy="1100" r="30" fill="#ffd44d"/><circle cx="220" cy="1100" r="30" fill="#42b8f5"/><circle cx="295" cy="1100" r="30" fill="#72d45c"/><g class="white bold mid"><text x="137" y="1109">1</text><text x="212" y="1109">2</text><text x="287" y="1109">1</text></g>
   <path d="M410 1120 A100 100 0 0 1 620 1120" fill="none" stroke="#d9e8f4" stroke-width="20"/><path d="M410 1120 A100 100 0 0 1 520 1020" fill="none" stroke="#4fd35e" stroke-width="16"/><path d="M520 1020 A100 100 0 0 1 620 1120" fill="none" stroke="#ff7a29" stroke-width="16"/>
-  <circle cx="515" cy="1115" r="76" fill="#ff7d1f" stroke="#d65300" stroke-width="7"/><text x="451" y="1108" class="white bold mid">長押しで</text><text x="466" y="1140" class="white bold mid">発射</text>
+  <circle cx="515" cy="1115" r="76" fill="#ff7d1f" stroke="#d65300" stroke-width="7"/><text x="451" y="1108" class="white bold mid">髟ｷ謚ｼ縺励〒</text><text x="466" y="1140" class="white bold mid">逋ｺ蟆・/text>
   <g fill="none" stroke="#4477aa" stroke-width="3"><path d="M40 135 H78"/><path d="M40 210 H55"/><path d="M680 420 H650"/><path d="M40 1085 H78"/></g>
-  <g class="bold small"><text x="8" y="125">タイトル</text><text x="8" y="205" fill="#d82020">危険ライン</text><text x="590" y="405">発射</text><text x="8" y="1078">NEXT</text></g>
-  <text x="70" y="1225" class="small">実装用参考モック：比率・配置・情報階層を参照。装飾や色は仮。</text>
+  <g class="bold small"><text x="8" y="125">繧ｿ繧､繝医Ν</text><text x="8" y="205" fill="#d82020">蜊ｱ髯ｺ繝ｩ繧､繝ｳ</text><text x="590" y="405">逋ｺ蟆・/text><text x="8" y="1078">NEXT</text></g>
+  <text x="70" y="1225" class="small">螳溯｣・畑蜿り・Δ繝・け・壽ｯ皮紫繝ｻ驟咲ｽｮ繝ｻ諠・ｱ髫主ｱ､繧貞盾辣ｧ縲り｣・｣ｾ繧・牡縺ｯ莉ｮ縲・/text>
 </svg>
