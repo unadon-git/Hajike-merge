@@ -172,4 +172,3 @@ export function updateBestScore(score: number, storage: ScoreStorage | null = br
   if (best > previous) saveBestScore(best, storage);
   return { best, isNewBest: best > previous };
 }
-

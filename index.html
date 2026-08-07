@@ -4,49 +4,49 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#071a34" />
-    <title>繝上ず繧ｱ繝槭・繧ｸ・・/title>
+    <title>ハジケマージ！</title>
   </head>
   <body>
     <div id="app">
-      <div id="game-shell" class="game-shell" aria-label="繝上ず繧ｱ繝槭・繧ｸ・√ご繝ｼ繝逕ｻ髱｢">
+      <div id="game-shell" class="game-shell" aria-label="ハジケマージ！ゲーム画面">
         <div id="game-canvas" class="game-canvas" aria-hidden="true"></div>
 
-        <header class="hud" aria-label="繧ｲ繝ｼ繝諠・ｱ">
+        <header class="hud" aria-label="ゲーム情報">
           <div class="title-block">
             <span class="eyebrow">PINBALL MERGE</span>
-            <h1>繝上ず繧ｱ繝槭・繧ｸ・・/h1>
+            <h1>ハジケマージ！</h1>
           </div>
           <div class="score-block">
-            <span>繧ｹ繧ｳ繧｢</span>
+            <span>スコア</span>
             <strong id="score-value">0</strong>
           </div>
           <div class="score-block best-score-block">
-            <span>繝吶せ繝・/span>
+            <span>ベスト</span>
             <strong id="best-value">0</strong>
           </div>
-          <button id="pause-button" class="icon-button" type="button" aria-label="荳譎ょ●豁｢" title="荳譎ょ●豁｢">竇｡</button>
+          <button id="pause-button" class="icon-button" type="button" aria-label="一時停止" title="一時停止">Ⅱ</button>
         </header>
 
-        <div id="danger-line" class="danger-line" aria-label="蜊ｱ髯ｺ繝ｩ繧､繝ｳ">
-          <span>笞 蜊ｱ髯ｺ繝ｩ繧､繝ｳ</span>
+        <div id="danger-line" class="danger-line" aria-label="危険ライン">
+          <span>⚠ 危険ライン</span>
           <span id="danger-progress" class="danger-progress"></span>
         </div>
 
         <div class="field-caption">MAIN FIELD</div>
-        <div class="lane-caption">逋ｺ蟆・Ξ繝ｼ繝ｳ</div>
+        <div class="lane-caption">発射レーン</div>
 
-        <section class="bottom-panel" aria-label="逋ｺ蟆・桃菴・>
+        <section class="bottom-panel" aria-label="発射操作">
           <div class="next-panel">
-            <div class="next-title">NEXT <span>谺｡縺ｮ繝上ず繧ｱ繧ｿ繝・/span></div>
-            <div id="next-list" class="next-list" aria-label="谺｡縺ｫ逋ｺ蟆・＆繧後ｋ逅・></div>
+            <div class="next-title">NEXT <span>次のハジケタマ</span></div>
+            <div id="next-list" class="next-list" aria-label="次に発射される球"></div>
           </div>
           <div class="launcher-panel">
-            <div class="power-track" aria-label="逋ｺ蟆・ヱ繝ｯ繝ｼ">
+            <div class="power-track" aria-label="発射パワー">
               <div id="power-fill" class="power-fill"></div>
             </div>
-            <button id="launch-button" class="launch-button" type="button" aria-label="髟ｷ謚ｼ縺励〒逋ｺ蟆・>
-              <span class="launch-icon">竊・/span>
-              <span>髟ｷ謚ｼ縺励〒<br />逋ｺ蟆・/span>
+            <button id="launch-button" class="launch-button" type="button" aria-label="長押しで発射">
+              <span class="launch-icon">↟</span>
+              <span>長押しで<br />発射</span>
             </button>
             <span id="launch-hint" class="launch-hint">READY</span>
           </div>
@@ -58,21 +58,20 @@
         <div id="overlay" class="overlay hidden" role="dialog" aria-modal="true">
           <div class="overlay-card">
             <div id="overlay-kicker" class="overlay-kicker">PAUSED</div>
-            <h2 id="overlay-title">荳譎ょ●豁｢荳ｭ</h2>
-            <p id="overlay-message">繧ｲ繝ｼ繝繧貞・髢九〒縺阪∪縺吶・/p>
+            <h2 id="overlay-title">一時停止中</h2>
+            <p id="overlay-message">ゲームを再開できます。</p>
             <div id="overlay-score" class="overlay-score hidden"></div>
-            <button id="overlay-action" class="primary-button" type="button">蜀埼幕</button>
+            <button id="overlay-action" class="primary-button" type="button">再開</button>
           </div>
         </div>
       </div>
 
       <div id="landscape-message" class="landscape-message" role="status">
-        <div class="phone-icon">笆ｯ</div>
-        <h2>遶ｯ譛ｫ繧堤ｸｦ蜷代″縺ｫ縺励※縺上□縺輔＞</h2>
-        <p>繝上ず繧ｱ繝槭・繧ｸ・√・邵ｦ逕ｻ髱｢縺ｧ驕翫∋縺ｾ縺吶・/p>
+        <div class="phone-icon">▯</div>
+        <h2>端末を縦向きにしてください</h2>
+        <p>ハジケマージ！は縦画面で遊べます。</p>
       </div>
     </div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>
-

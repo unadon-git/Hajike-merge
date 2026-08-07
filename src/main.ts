@@ -56,7 +56,7 @@ const updateNext = ({ queue }: QueueDetail): void => {
       item.className = `next-ball ${index === 0 ? 'next-ball-primary' : ''}`;
       item.style.setProperty('--ball-color', BALL_COLORS_CSS[level] ?? BALL_COLORS_CSS[1]);
       item.innerHTML = `<span>${level}</span>`;
-      item.setAttribute('aria-label', `繝ｬ繝吶Ν${level}`);
+      item.setAttribute('aria-label', `レベル${level}`);
       return item;
     }),
   );
@@ -70,7 +70,7 @@ const updatePower = ({ ratio }: PowerDetail): void => {
 
 const showCombo = ({ count, multiplier }: ComboDetail): void => {
   if (count < 2) return;
-  comboToast.textContent = `COMBO ${count}  ﾃ・{multiplier.toFixed(2)}`;
+  comboToast.textContent = `COMBO ${count}  ×${multiplier.toFixed(2)}`;
   comboToast.classList.add('visible');
   if (comboToastTimer !== undefined) window.clearTimeout(comboToastTimer);
   comboToastTimer = window.setTimeout(() => comboToast.classList.remove('visible'), 1_200);
@@ -90,21 +90,21 @@ const updateOverlay = (visible: boolean): void => {
 const setOverlayPaused = (): void => {
   isOverlayGameOver = false;
   overlayKicker.textContent = 'PAUSED';
-  overlayTitle.textContent = '荳譎ょ●豁｢荳ｭ';
-  overlayMessage.textContent = '繧ｲ繝ｼ繝繧貞・髢九〒縺阪∪縺吶・;
+  overlayTitle.textContent = '一時停止中';
+  overlayMessage.textContent = 'ゲームを再開できます。';
   overlayScore.classList.add('hidden');
-  overlayAction.textContent = '蜀埼幕';
+  overlayAction.textContent = '再開';
   updateOverlay(true);
 };
 
 const setOverlayGameOver = ({ score, best, isNewBest }: GameOverDetail): void => {
   isOverlayGameOver = true;
   overlayKicker.textContent = isNewBest ? 'NEW BEST!' : 'GAME OVER';
-  overlayTitle.textContent = '繧ｲ繝ｼ繝繧ｪ繝ｼ繝舌・';
-  overlayMessage.textContent = isNewBest ? '譁ｰ縺励＞繝吶せ繝医せ繧ｳ繧｢縺ｧ縺呻ｼ・ : '繝輔ぅ繝ｼ繝ｫ繝峨′縺・▲縺ｱ縺・↓縺ｪ繧翫∪縺励◆縲・;
-  overlayScore.textContent = `SCORE  ${formatNumber(score)}  ・・ BEST  ${formatNumber(best)}`;
+  overlayTitle.textContent = 'ゲームオーバー';
+  overlayMessage.textContent = isNewBest ? '新しいベストスコアです！' : 'フィールドがいっぱいになりました。';
+  overlayScore.textContent = `SCORE  ${formatNumber(score)}  ／  BEST  ${formatNumber(best)}`;
   overlayScore.classList.remove('hidden');
-  overlayAction.textContent = '繧ゅ≧荳蠎ｦ';
+  overlayAction.textContent = 'もう一度';
   updateOverlay(true);
 };
 
@@ -208,4 +208,3 @@ const game = new Phaser.Game({
 });
 
 window.addEventListener('beforeunload', () => game.destroy(true));
-

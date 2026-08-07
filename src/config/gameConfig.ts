@@ -154,4 +154,3 @@ export function radiusForLevel(level: number): number {
 export function massForLevel(level: number): number {
   return GAME_CONFIG.ball.baseMass + (level - 1) * GAME_CONFIG.ball.massStep;
 }
-
